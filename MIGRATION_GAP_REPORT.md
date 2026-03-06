@@ -1,10 +1,4 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/MIGRATION_GAP_REPORT.md b/MIGRATION_GAP_REPORT.md
-index fd3575520461f208251317ce9b5f072edca5cc8d..8211f816bffc72b1156d028c9ecf7a2b7a5aa76a 100644
---- a/MIGRATION_GAP_REPORT.md
-+++ b/MIGRATION_GAP_REPORT.md
-@@ -1,233 +1,241 @@
--# MIGRATION GAP REPORT
+# MIGRATION GAP REPORT
 -
 -## Wnioski (najpierw)
 -
@@ -478,6 +472,4 @@ index fd3575520461f208251317ce9b5f072edca5cc8d..8211f816bffc72b1156d028c9ecf7a2b
 +
 +- Raport opiera się wyłącznie na plikach w repo (`apps-script/` i `api/`).
 +- Jeżeli istnieje dodatkowy frontend lub osobne joby poza tym repo, ich obecności/zgodności nie da się tutaj potwierdzić.
- 
-EOF
-)
+
