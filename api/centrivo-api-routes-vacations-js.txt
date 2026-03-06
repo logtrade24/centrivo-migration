@@ -1,0 +1,302 @@
+const express = require("express");
+const router = express.Router();
+
+const {
+  getUserVacationBalance,
+  createVacationRequest,
+  listMyVacationRequests,
+  listPendingVacationRequests,
+  processVacationRequest,
+  submitYearPlanRequest,
+  listMyYearPlanRequests,
+  listPendingYearPlanRequests,
+  processYearPlanRequest,
+  processYearPlanWithDates,
+  getYearPlanDatesForCalendar,
+  getPendingAbsenceCountsByType,
+  getPendingAbsenceRequestsCount,
+  getUserAllAbsenceHistory,
+} = require("../services/sheets");
+
+function isManager(loginRaw) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+  const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return managers.includes(login);
+}
+
+// ===== URLOPY WYPOCZYNKOWE =====
+
+// POST /vacations/balance { login, code? }
+router.post("/balance", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const code  = String(req.body?.code  || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const balance = await getUserVacationBalance(login, code);
+    return res.json({ success: true, balance });
+  } catch (e) {
+    console.error("VACATIONS /balance ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/my-requests { login }
+router.post("/my-requests", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const requests = await listMyVacationRequests(login);
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("VACATIONS /my-requests ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/create { login, startDate, endDate, comment?, vacationType?, code? }
+router.post("/create", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const code  = String(req.body?.code  || "").trim();
+    const startDate = String(req.body?.startDate || "").trim();
+    const endDate = String(req.body?.endDate || "").trim();
+    const comment = String(req.body?.comment || "").trim();
+    const vacationType = String(req.body?.vacationType || "planowany").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!startDate || !endDate) return res.status(400).json({ success: false, message: "Brak dat" });
+
+    const result = await createVacationRequest(login, startDate, endDate, comment, vacationType, code);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("VACATIONS /create ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/pending { login }  (kierownik)
+// Zwraca oczekujące wnioski + informację o kolizjach z zatwierdzonymi urlopami
+router.post("/pending", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const requests = await listPendingVacationRequests();
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("VACATIONS /pending ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/process { login, requestId, decision, comment? }  (kierownik)
+// decision: "Zatwierdzony" | "Odrzucony"
+// Przy zatwierdzeniu automatycznie aktualizuje saldo urlopowe pracownika
+router.post("/process", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const requestId = Number(req.body?.requestId || 0);
+    const decision = String(req.body?.decision || "").trim();
+    const comment = String(req.body?.comment || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    if (!requestId) return res.status(400).json({ success: false, message: "Brak requestId" });
+    if (!["Zatwierdzony", "Odrzucony"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Zła decyzja (Zatwierdzony / Odrzucony)" });
+    }
+
+    const result = await processVacationRequest(requestId, decision, comment);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("VACATIONS /process ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// ===== PLAN ROCZNY URLOPÓW =====
+
+// POST /vacations/year-plan/submit { login, year, dates?, newDates?, removedDates?, name? }
+// Pracownik składa lub aktualizuje swój plan roczny
+router.post("/year-plan/submit", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const year = Number(req.body?.year || new Date().getFullYear());
+    const name = String(req.body?.name || "").trim();
+    const dates = req.body?.dates;
+    const newDates = req.body?.newDates;
+    const removedDates = req.body?.removedDates;
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!year || year < 2024 || year > 2030) {
+      return res.status(400).json({ success: false, message: "Nieprawidłowy rok" });
+    }
+
+    const result = await submitYearPlanRequest({ login, year, name, dates, newDates, removedDates });
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("VACATIONS /year-plan/submit ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/year-plan/my { login, year? }
+// Pracownik pobiera swoje plany roczne
+router.post("/year-plan/my", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const year = req.body?.year ? Number(req.body.year) : null;
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const requests = await listMyYearPlanRequests(login, year);
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("VACATIONS /year-plan/my ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/year-plan/pending { login }  (kierownik)
+// Oczekujące plany roczne do zatwierdzenia
+router.post("/year-plan/pending", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const requests = await listPendingYearPlanRequests();
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("VACATIONS /year-plan/pending ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/year-plan/process { login, requestId, decision, comment? }  (kierownik)
+// decision: "Zatwierdzony" | "Odrzucony"
+router.post("/year-plan/process", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const requestId = Number(req.body?.requestId || 0);
+    const decision = String(req.body?.decision || "").trim();
+    const comment = String(req.body?.comment || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    if (!requestId) return res.status(400).json({ success: false, message: "Brak requestId" });
+    if (!["Zatwierdzony", "Odrzucony"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Zła decyzja (Zatwierdzony / Odrzucony)" });
+    }
+
+    const result = await processYearPlanRequest(requestId, decision, comment);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("VACATIONS /year-plan/process ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/year-plan/process-dates { login, requestId, decision, comment?, selectedDates }  (kierownik)
+// Częściowe zatwierdzenie — kierownik wskazuje które dni zatwierdza
+// decision: "Zatwierdzony" | "Częściowo zatwierdzony" | "Odrzucony"
+router.post("/year-plan/process-dates", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const requestId = Number(req.body?.requestId || 0);
+    const decision = String(req.body?.decision || "").trim();
+    const comment = String(req.body?.comment || "").trim();
+    const selectedDates = Array.isArray(req.body?.selectedDates) ? req.body.selectedDates : [];
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    if (!requestId) return res.status(400).json({ success: false, message: "Brak requestId" });
+    if (!["Zatwierdzony", "Częściowo zatwierdzony", "Odrzucony"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Zła decyzja" });
+    }
+    if (decision !== "Odrzucony" && selectedDates.length === 0) {
+      return res.status(400).json({ success: false, message: "Brak selectedDates dla zatwierdzenia" });
+    }
+
+    const result = await processYearPlanWithDates(requestId, decision, comment, selectedDates);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("VACATIONS /year-plan/process-dates ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/year-plan/calendar { login, year }
+// Zwraca daty podzielone na: planned (Oczekujący), approved (Zatwierdzony), rejected (Odrzucony)
+router.post("/year-plan/calendar", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const year = req.body?.year ? Number(req.body.year) : new Date().getFullYear();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const result = await getYearPlanDatesForCalendar(login, year);
+    return res.json({ success: true, ...result });
+  } catch (e) {
+    console.error("VACATIONS /year-plan/calendar ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/pending-counts { login }  (kierownik)
+// Zwraca liczbę oczekujących wniosków każdego typu: { vacation, dayoff, occasional, yearplan }
+router.post("/pending-counts", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const counts = await getPendingAbsenceCountsByType();
+    return res.json({ success: true, ...counts });
+  } catch (e) {
+    console.error("VACATIONS /pending-counts ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/pending-count { login }  (kierownik)
+// Zwraca łączną liczbę oczekujących wniosków (wszystkich typów)
+router.post("/pending-count", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const count = await getPendingAbsenceRequestsCount();
+    return res.json({ success: true, count });
+  } catch (e) {
+    console.error("VACATIONS /pending-count ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /vacations/my-all { login }
+// Zwraca całą historię wniosków pracownika (wszystkie typy nieobecności)
+router.post("/my-all", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const requests = await getUserAllAbsenceHistory(login);
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("VACATIONS /my-all ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

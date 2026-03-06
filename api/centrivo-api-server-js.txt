@@ -1,0 +1,81 @@
+require("dotenv").config();
+const express = require("express");
+const scanRoute = require("./routes/scan");
+const employeeRoute = require("./routes/employee");
+const announcementsRoute = require("./routes/announcements");
+const workforceRoute = require("./routes/workforce");
+const dashboardRoute = require("./routes/dashboard");
+const vacationsRoute = require("./routes/vacations");
+const absencesRoute = require("./routes/absences");
+const pdfRoute     = require("./routes/pdf");
+const ticketsRoute = require("./routes/tickets");
+const cors = require("cors");
+const { google } = require("googleapis");
+
+const app = express();
+
+app.use(cors({
+  origin: ["https://app.centrivo.pl", "https://d329564b.centrivo-app.pages.dev"],
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type"]
+}));
+
+app.use(express.json());
+
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+app.use("/scan", scanRoute);
+app.use("/employee", employeeRoute);
+app.use("/announcements", announcementsRoute);
+app.use("/workforce", workforceRoute);
+app.use("/dashboard", dashboardRoute);
+app.use("/vacations", vacationsRoute);
+app.use("/absences", absencesRoute);
+app.use("/pdf",     pdfRoute);
+app.use("/tickets", ticketsRoute);
+
+
+const PORT = process.env.PORT || 3000;
+
+// Autoryzacja Google Sheets
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
+  },
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+});
+
+const sheets = google.sheets({ version: "v4", auth });
+
+// TEST endpoint
+app.get("/", (req, res) => {
+  res.json({ status: "Centrivo API działa" });
+});
+
+// Przykładowy zapis (test)
+app.post("/test-write", async (req, res) => {
+  try {
+    const { value } = req.body;
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: "Arkusz1!A1",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [[new Date().toISOString(), value]]
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Błąd zapisu do Sheets" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log("Server działa na porcie " + PORT);
+});

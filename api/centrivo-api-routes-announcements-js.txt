@@ -1,0 +1,120 @@
+const express = require("express");
+const router = express.Router();
+
+const {
+  getUnreadAnnouncements,
+  markAnnouncementAsRead,
+  listAnnouncementsForManager,
+  listEmployeesForRecipients,
+  createAnnouncement,
+} = require("../services/sheets");
+
+// POST /announcements/unread { login }
+router.post("/unread", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) {
+      return res.status(400).json({ success: false, message: "Brak login" });
+    }
+
+    const announcements = await getUnreadAnnouncements(login);
+    return res.json({ success: true, announcements });
+  } catch (e) {
+    console.error("ANNOUNCEMENTS /unread ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /announcements/mark-read { id, login }
+router.post("/mark-read", async (req, res) => {
+  try {
+    const id = String(req.body?.id || "").trim();
+    const login = String(req.body?.login || "").trim();
+
+    if (!id) return res.status(400).json({ success: false, message: "Brak id" });
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    await markAnnouncementAsRead(id, login);
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("ANNOUNCEMENTS /mark-read ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /announcements/list  { login }
+router.post("/list", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    // proste zabezpieczenie: lista managerów w ENV
+    const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+      .split(",")
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (!managers.includes(login)) {
+      return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    }
+
+    const announcements = await listAnnouncementsForManager();
+    return res.json({ success: true, announcements });
+  } catch (e) {
+    console.error("ANNOUNCEMENTS LIST ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /announcements/employees  { login }
+router.post("/employees", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+      .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
+    if (!managers.includes(login)) {
+      return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    }
+
+    const employees = await listEmployeesForRecipients();
+    return res.json({ success: true, employees });
+  } catch (e) {
+    console.error("ANNOUNCEMENTS EMPLOYEES ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /announcements/create  { login, typ, tresc, dataWaznosci, odbiorcy, autor }
+router.post("/create", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+      .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
+    if (!managers.includes(login)) {
+      return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    }
+
+    const typ = String(req.body?.typ || "info").trim();
+    const tresc = String(req.body?.tresc || "").trim();
+    const dataWaznosci = String(req.body?.dataWaznosci || "").trim();
+    const odbiorcy = String(req.body?.odbiorcy || "WSZYSCY").trim();
+    const autor = String(req.body?.autor || login).trim();
+
+    if (!tresc) return res.status(400).json({ success: false, message: "Brak treści" });
+    if (!dataWaznosci) return res.status(400).json({ success: false, message: "Brak daty ważności" });
+
+    const out = await createAnnouncement(typ, tresc, dataWaznosci, odbiorcy, autor);
+    return res.json({ success: true, id: out.id });
+  } catch (e) {
+    console.error("ANNOUNCEMENTS CREATE ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

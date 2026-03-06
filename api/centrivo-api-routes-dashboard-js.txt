@@ -1,0 +1,87 @@
+const express = require("express");
+const router = express.Router();
+
+const { getDashboardSnapshot, getDashboardFull, getAbsenceHistory, getDashboardReport } = require("../services/sheets");
+
+function isManager(loginRaw) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+  const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return managers.includes(login);
+}
+
+// POST /dashboard/snapshot { login }
+router.post("/snapshot", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    // Jak chcesz twardo blokować:
+    // if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const snap = await getDashboardSnapshot();
+    return res.json({ success: true, ...snap });
+  } catch (e) {
+    console.error("DASHBOARD /snapshot ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /dashboard/full { login, dept? }
+router.post("/full", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const dept = String(req.body?.dept || "ALL").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const data = await getDashboardFull({ dept });
+    return res.json({ success: true, ...data });
+  } catch (e) {
+    console.error("DASHBOARD /full ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /dashboard/absence-history { login, days?, dept? }
+router.post("/absence-history", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const dept = String(req.body?.dept || "ALL").trim();
+    const daysRaw = req.body?.days;
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const days = (daysRaw === null || daysRaw === "null" || typeof daysRaw === "undefined")
+      ? null
+      : Number(daysRaw);
+
+    const data = await getAbsenceHistory({ days, dept });
+    return res.json({ success: true, ...data });
+  } catch (e) {
+    console.error("DASHBOARD /absence-history ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /dashboard/report { login, days?, dept? }
+router.post("/report", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const dept = String(req.body?.dept || "ALL").trim();
+    const daysRaw = req.body?.days;
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const days = Number(daysRaw || 7) || 7;
+
+    const data = await getDashboardReport({ days, dept });
+    return res.json({ success: true, ...data });
+  } catch (e) {
+    console.error("DASHBOARD /report ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

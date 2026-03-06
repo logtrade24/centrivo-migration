@@ -1,0 +1,241 @@
+const express = require("express");
+const router = express.Router();
+
+const {
+  // day off
+  createDayOffRequest,
+  listMyDayOffRequests,
+  listPendingDayOffRequests,
+  processDayOffRequest,
+
+  // occasional
+  createOccasionalLeaveRequest,
+  listMyOccasionalLeaveRequests,
+  listPendingOccasionalLeaveRequests,
+  processOccasionalLeaveRequest,
+
+  // l4
+  registerL4,
+  listMyL4,
+} = require("../services/sheets");
+
+function isManager(loginRaw) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+  const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return managers.includes(login);
+}
+
+/**
+ * ===== DNI WOLNE (arkusz: Dni_wolne)
+ */
+
+// POST /absences/dayoff/create { login, code?, date, type, timeFrom?, timeTo?, reason? }
+router.post("/dayoff/create", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const code = String(req.body?.code || "").trim();
+    const date = String(req.body?.date || "").trim();
+    const type = String(req.body?.type || "").trim();
+    const timeFrom = String(req.body?.timeFrom || "").trim();
+    const timeTo = String(req.body?.timeTo || "").trim();
+    const reason = String(req.body?.reason || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!date) return res.status(400).json({ success: false, message: "Brak daty" });
+    if (!type) return res.status(400).json({ success: false, message: "Brak typu" });
+
+    const result = await createDayOffRequest({ login, code, date, type, timeFrom, timeTo, reason });
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("ABSENCES dayoff/create ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/dayoff/my { login }
+router.post("/dayoff/my", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const requests = await listMyDayOffRequests(login);
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("ABSENCES dayoff/my ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/dayoff/pending { login }  (manager)
+router.post("/dayoff/pending", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const requests = await listPendingDayOffRequests();
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("ABSENCES dayoff/pending ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/dayoff/process { login, requestId, decision, comment? }  (manager)
+router.post("/dayoff/process", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const requestId = Number(req.body?.requestId || 0);
+    const decision = String(req.body?.decision || "").trim(); // Zatwierdzony / Odrzucony
+    const comment = String(req.body?.comment || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    if (!requestId) return res.status(400).json({ success: false, message: "Brak requestId" });
+    if (!["Zatwierdzony", "Odrzucony"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Zła decyzja" });
+    }
+
+    const result = await processDayOffRequest(requestId, decision, comment);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("ABSENCES dayoff/process ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+/**
+ * ===== URLOP OKOLICZNOŚCIOWY (arkusz: Urlopy_okolicznosciowe)
+ */
+
+// POST /absences/occasional/create { login, code?, type, dateStart, dateEnd, note? }
+router.post("/occasional/create", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    const code = String(req.body?.code || "").trim();
+    const type = String(req.body?.type || "").trim();
+    const dateStart = String(req.body?.dateStart || "").trim();
+    const dateEnd = String(req.body?.dateEnd || "").trim();
+    const note = String(req.body?.note || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!type) return res.status(400).json({ success: false, message: "Brak typu" });
+    if (!dateStart || !dateEnd) return res.status(400).json({ success: false, message: "Brak dat" });
+
+    const result = await createOccasionalLeaveRequest({ login, code, type, dateStart, dateEnd, note });
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("ABSENCES occasional/create ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/occasional/my { login }
+router.post("/occasional/my", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const requests = await listMyOccasionalLeaveRequests(login);
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("ABSENCES occasional/my ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/occasional/pending { login } (manager)
+router.post("/occasional/pending", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const requests = await listPendingOccasionalLeaveRequests();
+    return res.json({ success: true, requests });
+  } catch (e) {
+    console.error("ABSENCES occasional/pending ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/occasional/process { login, requestId, decision, comment? } (manager)
+router.post("/occasional/process", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    const requestId = Number(req.body?.requestId || 0);
+    const decision = String(req.body?.decision || "").trim();
+    const comment = String(req.body?.comment || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    if (!requestId) return res.status(400).json({ success: false, message: "Brak requestId" });
+    if (!["Zatwierdzony", "Odrzucony"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Zła decyzja" });
+    }
+
+    const result = await processOccasionalLeaveRequest(requestId, decision, comment);
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("ABSENCES occasional/process ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+/**
+ * ===== L4 (arkusz: Zwolnienia_lekarskie)
+ * W DBK to nie jest „wniosek do akceptacji”, tylko rejestracja z automatycznym statusem
+ */
+
+// POST /absences/l4/register { login, code?, employeeLogin?, startDate, endDate, l4Type, note? }
+router.post("/l4/register", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase(); // kto wysyła (kierownik lub pracownik)
+    const code = String(req.body?.code || "").trim();
+
+    const employeeLogin = String(req.body?.employeeLogin || req.body?.login || "").trim(); // domyślnie self
+    const startDate = String(req.body?.startDate || "").trim();
+    const endDate = String(req.body?.endDate || "").trim();
+    const l4Type = String(req.body?.l4Type || "Choroba").trim();
+    const note = String(req.body?.note || "").trim();
+
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!employeeLogin) return res.status(400).json({ success: false, message: "Brak employeeLogin" });
+    if (!startDate || !endDate) return res.status(400).json({ success: false, message: "Brak dat" });
+
+    // jeśli ktoś rejestruje L4 nie dla siebie -> wymagaj managera
+    if (employeeLogin.toLowerCase() !== login && !isManager(login)) {
+      return res.status(403).json({ success: false, message: "Brak uprawnień" });
+    }
+
+    const result = await registerL4({ employeeLogin, startDate, endDate, l4Type, note, code });
+    if (!result?.success) return res.status(400).json(result);
+    return res.json(result);
+  } catch (e) {
+    console.error("ABSENCES l4/register ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /absences/l4/my { login }
+router.post("/l4/my", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+
+    const list = await listMyL4(login);
+    return res.json({ success: true, list });
+  } catch (e) {
+    console.error("ABSENCES l4/my ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

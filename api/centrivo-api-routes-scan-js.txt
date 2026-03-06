@@ -1,0 +1,170 @@
+const express = require("express");
+const router = express.Router();
+const {
+  getEmployeeByCode,
+  updateEmployeeStatus,
+  updateEmployeeDepartment,
+  addLog,
+  getUnreadAnnouncements,
+} = require("../services/sheets");
+
+router.post("/", async (req, res) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    const intent = String(req.body?.intent || "AUTO").toUpperCase();
+    const deptFromReq = String(req.body?.department || "").trim();
+    const includeAnnouncements = req.body?.includeAnnouncements === true;
+
+    if (!code) {
+      return res.status(400).json({ success: false, message: "Brak kodu" });
+    }
+
+    const employee = await getEmployeeByCode(code);
+
+    if (!employee) {
+      return res.status(404).json({ success: false, message: "Nieznany kod" });
+    }
+    
+    const loginForAnnouncements = employee.id; // u nas id = login z arkusza
+
+    // ==========================
+    // 1) ZMIANA OPERACJI (CHANGE_DEPT)
+    // ==========================
+    if (intent === "CHANGE_DEPT") {
+      if (!deptFromReq) {
+        return res.status(400).json({ success: false, message: "Brak department" });
+      }
+
+      // Bezpiecznie: pozwalamy zmieniać operację tylko gdy pracuje
+      if (employee.status !== "WORKING") {
+        return res.status(400).json({
+          success: false,
+          message: "Zmiana operacji możliwa tylko gdy pracujesz (status WORKING).",
+        });
+      }
+
+      await updateEmployeeDepartment(employee.rowIndex, deptFromReq);
+      await addLog(employee.id, "CHANGE_DEPT", deptFromReq);
+
+      return res.json({
+        success: true,
+        employee: employee.name,
+        action: "CHANGE_DEPT",
+        status: employee.status, // bez zmiany statusu
+        department: deptFromReq,
+        timestamp: new Date().toISOString(),
+        announcements: includeAnnouncements ? await getUnreadAnnouncements(loginForAnnouncements) : [],
+      });
+    }
+
+       // ==========================
+    // 2) TRYB INTENT (gdy front wysyła konkretną akcję)
+    // ==========================
+    if (intent !== "AUTO") {
+      let newStatus = employee.status;
+
+      // ✅ kontrola co zapisujemy do loga i co zwracamy we response
+      let deptToLog = employee.department;
+      let deptToReturn = employee.department;
+
+      if (intent === "ENTRY") {
+        if (employee.status !== "OUT") {
+          return res.status(400).json({ success: false, message: "Nie możesz zrobić ENTRY, bo nie jesteś OUT." });
+        }
+        newStatus = "WORKING";
+
+        // ✅ jeśli front podał department (kafelek), to ma wygrać
+        const deptToSet = deptFromReq || employee.baseDepartment || employee.department || "";
+        await updateEmployeeDepartment(employee.rowIndex, deptToSet);
+
+        deptToLog = deptToSet;
+        deptToReturn = deptToSet;
+
+      } else if (intent === "EXIT") {
+        if (employee.status !== "WORKING") {
+          return res.status(400).json({ success: false, message: "Nie możesz zrobić EXIT, bo nie jesteś WORKING." });
+        }
+        newStatus = "OUT";
+
+        // reset operacji po wyjściu (żeby kolejne ENTRY brało przypisany dział)
+        await updateEmployeeDepartment(employee.rowIndex, "");
+
+        // deptToLog zostaje taki jak był (employee.department), żeby log nie był pusty
+
+      } else if (intent === "BREAK_START") {
+        if (employee.status !== "WORKING") {
+          return res.status(400).json({ success: false, message: "Nie możesz zacząć przerwy, bo nie jesteś WORKING." });
+        }
+        newStatus = "BREAK";
+
+      } else if (intent === "BREAK_END") {
+        if (employee.status !== "BREAK") {
+          return res.status(400).json({ success: false, message: "Nie możesz zakończyć przerwy, bo nie jesteś BREAK." });
+        }
+        newStatus = "WORKING";
+
+      } else {
+        return res.status(400).json({ success: false, message: `Nieobsługiwany intent: ${intent}` });
+      }
+
+      await addLog(employee.id, intent, deptToLog);
+      await updateEmployeeStatus(employee.rowIndex, newStatus);
+
+      return res.json({
+        success: true,
+        employee: employee.name,
+        action: intent,
+        status: newStatus,
+        department: deptToReturn,
+        timestamp: new Date().toISOString(),
+        announcements: includeAnnouncements ? await getUnreadAnnouncements(loginForAnnouncements) : [],
+      });
+    }
+
+    // ==========================
+    // 3) TRYB AUTO (stare zachowanie)
+    // ==========================
+    let action, newStatus;
+
+    switch (employee.status) {
+      case "OUT":
+        action = "ENTRY";
+        newStatus = "WORKING";
+        break;
+
+      case "WORKING":
+        action = "BREAK_START";
+        newStatus = "BREAK";
+        break;
+
+      case "BREAK":
+        action = "BREAK_END";
+        newStatus = "WORKING";
+        break;
+
+      default:
+        return res.status(400).json({ success: false, message: "Nieznany status" });
+    }
+
+    await addLog(employee.id, action, employee.department);
+    await updateEmployeeStatus(employee.rowIndex, newStatus);
+
+    return res.json({
+      success: true,
+      employee: employee.name,
+      action,
+      status: newStatus,
+      department: employee.department,
+      timestamp: new Date().toISOString(),
+      announcements: includeAnnouncements ? await getUnreadAnnouncements(loginForAnnouncements) : [],
+    });
+  } catch (e) {
+  console.error("SCAN ERROR:", e);
+
+  // debug (na czas diagnozy)
+  const msg = (e && e.message) ? e.message : String(e);
+  return res.status(500).json({ success: false, message: msg });
+}
+});
+
+module.exports = router;

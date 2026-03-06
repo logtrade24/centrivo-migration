@@ -1,0 +1,48 @@
+const express = require("express");
+const router = express.Router();
+
+const {
+  getWorkforceLiveSnapshot,
+  getActiveEmployees,
+} = require("../services/sheets");
+
+function isManager(loginRaw) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+  const managers = String(process.env.MANAGER_LOGINS || "jerzyd")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return managers.includes(login);
+}
+
+// POST /workforce/live-snapshot  { login }
+router.post("/live-snapshot", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    //if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const result = await getWorkforceLiveSnapshot();
+    return res.json({ success: true, ...result });
+  } catch (e) {
+    console.error("WORKFORCE /live-snapshot ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+// POST /workforce/active  { login }
+router.post("/active", async (req, res) => {
+  try {
+    const login = String(req.body?.login || "").trim().toLowerCase();
+    if (!login) return res.status(400).json({ success: false, message: "Brak login" });
+    if (!isManager(login)) return res.status(403).json({ success: false, message: "Brak uprawnień" });
+
+    const data = await getActiveEmployees();
+    return res.json({ success: true, data });
+  } catch (e) {
+    console.error("WORKFORCE /active ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

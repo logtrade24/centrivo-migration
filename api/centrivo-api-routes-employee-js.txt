@@ -1,0 +1,48 @@
+const express = require("express");
+const router = express.Router();
+const { getEmployeeByCode } = require("../services/sheets");
+
+router.post("/by-code", async (req, res) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+
+    if (!code)
+      return res.status(400).json({ success: false, message: "Brak kodu" });
+
+    const employee = await getEmployeeByCode(code);
+
+    if (!employee)
+      return res.status(404).json({ success: false, message: "Nieznany kod" });
+
+    // Mapowanie statusów jak w DBK
+    let statusPl;
+
+    switch (employee.status) {
+      case "OUT":
+        statusPl = "Nieaktywny";
+        break;
+      case "WORKING":
+        statusPl = "Pracuje";
+        break;
+      case "BREAK":
+        statusPl = "Na przerwie";
+        break;
+      default:
+        statusPl = "Nieaktywny";
+    }
+
+    return res.json({
+      success: true,
+      login: employee.id,
+      name: employee.name,
+      status: statusPl,
+      currentDepartment: employee.department
+    });
+
+  } catch (e) {
+    console.error("EMPLOYEE LOOKUP ERROR:", e);
+    return res.status(500).json({ success: false, message: "Błąd serwera" });
+  }
+});
+
+module.exports = router;

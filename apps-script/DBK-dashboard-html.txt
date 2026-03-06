@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Kto jest w pracy</title>
+  
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      padding: 30px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      border-bottom: 3px solid #667eea;
+      padding-bottom: 20px;
+    }
+    
+    .header h1 {
+      font-size: 2.5em;
+      color: #333;
+      margin-bottom: 10px;
+    }
+    
+    .timestamp {
+      color: #666;
+      font-size: 1.1em;
+    }
+    
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    
+    .summary-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      border-radius: 15px;
+      text-align: center;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    
+    .summary-card h3 {
+      font-size: 0.9em;
+      opacity: 0.9;
+      margin-bottom: 10px;
+    }
+    
+    .summary-card .value {
+      font-size: 2.5em;
+      font-weight: bold;
+    }
+    
+    .section-title {
+      font-size: 1.5em;
+      color: #333;
+      margin: 30px 0 15px 0;
+      padding-left: 10px;
+      border-left: 5px solid #667eea;
+    }
+    
+    .shifts-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    
+    .shift-card {
+      background: #f8f9fa;
+      border-radius: 15px;
+      padding: 20px;
+      border: 2px solid #e0e0e0;
+    }
+    
+    .shift-card.not-started {
+      opacity: 0.5;
+      background: #f0f0f0;
+    }
+    
+    .shift-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+    
+    .shift-time {
+      font-size: 1.3em;
+      font-weight: bold;
+      color: #333;
+    }
+    
+    .shift-alert {
+      font-size: 2em;
+    }
+    
+    .progress-bar {
+      height: 30px;
+      background: #e0e0e0;
+      border-radius: 15px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #4caf50, #8bc34a);
+      transition: width 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+    }
+    
+    .progress-fill.warning {
+      background: linear-gradient(90deg, #ff9800, #ffc107);
+    }
+    
+    .progress-fill.critical {
+      background: linear-gradient(90deg, #f44336, #e91e63);
+    }
+    
+    .shift-stats {
+      font-size: 0.9em;
+      color: #666;
+      margin-top: 10px;
+    }
+    
+    .workers-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+    
+    .workers-table th {
+      background: #667eea;
+      color: white;
+      padding: 12px;
+      text-align: left;
+      font-size: 0.9em;
+    }
+    
+    .workers-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .workers-table tr:hover {
+      background: #f5f5f5;
+    }
+    
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 0.85em;
+      font-weight: bold;
+    }
+    
+    .status-working {
+      background: #4caf50;
+      color: white;
+    }
+    
+    .status-break {
+      background: #ff9800;
+      color: white;
+    }
+    
+    .status-absent {
+      background: #f44336;
+      color: white;
+    }
+    
+    .status-vacation {
+      background: #2196f3;
+      color: white;
+    }
+    
+    .status-left {
+      background: #9e9e9e;
+      color: white;
+    }
+
+    .status-l4 {
+      background: #9c27b0;
+      color: white;
+    }
+
+    .status-dayoff {
+      background: #4CAF50;
+      color: white;
+    }
+    
+    .status-occasional {
+      background: #9C27B0;
+      color: white;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 50px;
+      font-size: 1.5em;
+      color: #666;
+    }
+    
+    .error {
+      background: #f44336;
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      margin: 20px 0;
+    }
+
+    /* Historia nieobecności */
+.absence-filters {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 20px;
+  align-items: center;
+}
+
+.absence-filters select {
+  padding: 10px 15px;
+  border: 2px solid #667eea;
+  border-radius: 8px;
+  font-size: 1em;
+  background: white;
+  cursor: pointer;
+}
+
+.export-btn {
+  padding: 10px 20px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1em;
+  transition: all 0.3s ease;
+}
+
+.export-btn:hover {
+  background: #764ba2;
+  transform: translateY(-2px);
+}
+
+.absence-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 30px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.absence-history-table thead {
+  background: #667eea;
+  color: white;
+}
+
+.absence-history-table th {
+  padding: 15px;
+  text-align: left;
+  font-weight: bold;
+}
+
+.absence-history-table td {
+  padding: 12px 15px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.absence-history-table tr:hover {
+  background: #f5f5f5;
+}
+
+/* Kolory wierszy według typu */
+.absence-vacation {
+  background: #e1f5fe;
+}
+
+.absence-l4 {
+  background: #f3e5f5;
+}
+
+.absence-unjustified {
+  background: #ffebee;
+}
+
+.absence-dayoff {
+  background: #e8f5e9;
+}
+
+.absence-occasional {
+  background: #f3e5f5;
+}
+
+/* Wyróżnienie obecnego tygodnia - pogrubienie */
+.absence-history-table tr.current-week {
+  font-weight: bold;
+  border-left: 5px solid #667eea;
+}
+
+.absence-history-table tr.current-week td {
+  font-weight: bold;
+}
+
+/* Statystyki */
+.absence-stats {
+  background: #f8f9fa;
+  padding: 20px;
+  border-radius: 10px;
+  border-left: 5px solid #667eea;
+  margin-top: 20px;
+}
+
+.absence-stats h3 {
+  margin-bottom: 10px;
+  color: #333;
+}
+
+.absence-stats p {
+  font-size: 1.1em;
+  color: #666;
+}
+
+.absence-stats strong {
+  color: #667eea;
+  font-size: 1.2em;
+}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📊 Dashboard - Kto jest w pracy</h1>
+      <div class="timestamp" id="timestamp">Ładowanie...</div>
+    </div>
+    
+    <div id="dashboard-content">
+      <div class="loading">⏳ Ładowanie danych...</div>
+    </div>
+
+    <!-- Historia nieobecności - OSOBNY KONTENER -->
+    <h2 class="section-title">📅 HISTORIA NIEOBECNOŚCI</h2>
+    <div id="absence-history-container">
+      <div class="loading">⏳ Ładowanie historii...</div>
+    </div>
+  </div>
+
+  <script>
+    // Auto-refresh co 30 sekund
+    let refreshInterval;
+    
+    function startAutoRefresh() {
+      refreshDashboard();
+      refreshInterval = setInterval(refreshDashboard, 30000); // 30 sekund
+      
+      // Załaduj historię tylko raz przy starcie
+      loadAbsenceHistory(null);
+    }
+    
+    function refreshDashboard() {
+      console.log('Odświeżanie dashboardu...');
+      google.script.run
+        .withSuccessHandler(updateUI)
+        .withFailureHandler(showError)
+        .getDashboardData();
+    }
+    
+    function updateUI(data) {
+      console.log('=== DEBUG DASHBOARDU ===');
+      console.log('Wszystkie dane:', data);
+      console.log('Klucze zmian:', Object.keys(data.shifts));
+      console.log('========================');
+      console.log('Dane otrzymane:', data);
+      
+      document.getElementById('timestamp').textContent = 
+        `Stan na: ${data.timestamp}`;
+      
+      let html = '';
+      
+      // SEKCJA: Podsumowanie
+      html += `
+        <div class="summary">
+          <div class="summary-card">
+            <h3>👥 ZAPLANOWANO</h3>
+            <div class="value">${data.overall.planned}</div>
+          </div>
+          <div class="summary-card">
+            <h3>✅ OBECNI</h3>
+            <div class="value">${data.overall.present}</div>
+          </div>
+          <div class="summary-card">
+            <h3>❌ NIEOBECNI</h3>
+            <div class="value">${data.overall.absent}</div>
+          </div>
+          <div class="summary-card">
+            <h3>🏖️ URLOP</h3>
+            <div class="value">${data.overall.vacation}</div>
+          </div>
+          <div class="summary-card">
+            <h3>🏥 L4</h3>
+            <div class="value">${data.overall.l4 || 0}</div>
+          </div>
+          <div class="summary-card">
+            <h3>📋 INNE NIEOB.</h3>
+            <div class="value">${data.overall.otherAbsences || 0}</div>
+          </div>
+          <div class="summary-card">
+            <h3>📈 FREKWENCJA</h3>
+            <div class="value">${data.overall.frekwencja}%</div>
+          </div>
+        </div>
+      `;
+      
+      // SEKCJA: Zmiany
+      html += '<h2 class="section-title">🕐 ZMIANY - OBSADA</h2>';
+      html += '<div class="shifts-container">';
+
+      // Sortuj klucze chronologicznie PRZED renderowaniem
+      const shiftKeys = Object.keys(data.shifts).sort((a, b) => {
+        return a.localeCompare(b);
+      });
+
+      shiftKeys.forEach(shiftKey => {
+        const shift = data.shifts[shiftKey];
+        html += renderShiftCard(shift, shiftKey);
+      });
+      
+      html += '</div>';
+      
+      // SEKCJA: Tabela pracowników
+      html += '<h2 class="section-title">📋 SZCZEGÓŁY PRACOWNIKÓW</h2>';
+      html += renderWorkersTable(data.shifts);
+
+      document.getElementById('dashboard-content').innerHTML = html;
+    }
+    
+    function renderShiftCard(shift, shiftKey) {
+      if (!shift.started) {
+        return `
+          <div class="shift-card not-started">
+            <div class="shift-header">
+              <div class="shift-time">⏰ ${shiftKey}</div>
+              <div class="shift-alert">⚪</div>
+            </div>
+            <div class="shift-stats">
+              ⏳ Zmiana jeszcze nie rozpoczęta<br>
+              Zaplanowano: ${shift.planned.length} osób
+            </div>
+          </div>
+        `;
+      }
+      
+      const totalWithoutAbsences = shift.planned.length - shift.vacation - (shift.l4 || 0) - (shift.dayOff || 0) - (shift.occasional || 0);
+      const progressClass = shift.coverage >= 80 ? '' : 
+                           shift.coverage >= 50 ? 'warning' : 'critical';
+      
+      return `
+        <div class="shift-card">
+          <div class="shift-header">
+            <div class="shift-time">⏰ ${shiftKey}</div>
+            <div class="shift-alert">${shift.alert}</div>
+          </div>
+          
+          <div class="progress-bar">
+            <div class="progress-fill ${progressClass}" style="width: ${shift.coverage}%">
+              ${shift.present}/${totalWithoutAbsences} (${shift.coverage}%)
+            </div>
+          </div>
+          
+         <div class="shift-stats">
+            ✅ Pracuje: ${shift.present - shift.onBreak} &nbsp;
+            🟡 Przerwa: ${shift.onBreak} &nbsp;
+            ❌ Nieobecni: ${shift.absent}<br>
+            🏖️ Urlop: ${shift.vacation} &nbsp;
+            🏥 L4: ${shift.l4 || 0} &nbsp;
+            📅 Dzień wolny: ${shift.dayOff || 0} &nbsp;
+            🎊 Okoliczn.: ${shift.occasional || 0} &nbsp;
+            ⚪ Wyszło: ${shift.left}
+          </div>
+        </div>
+      `;
+    }
+    
+    function renderWorkersTable(shifts) {
+      let html = '<table class="workers-table">';
+      html += `
+        <thead>
+          <tr>
+            <th>Zmiana</th>
+            <th>Login</th>
+            <th>Imię</th>
+            <th>Dział</th>
+            <th>Status</th>
+            <th>Czas</th>
+          </tr>
+        </thead>
+        <tbody>
+      `;
+      
+      Object.keys(shifts).forEach(shiftKey => {
+        const shift = shifts[shiftKey];
+        
+        shift.planned.forEach(worker => {
+          const status = worker.currentStatus || {};
+          const statusClass = `status-${status.statusKey || 'absent'}`;
+          
+          let timeInfo = '---';
+          if (status.workTime) timeInfo = status.workTime;
+          else if (status.breakTime) timeInfo = `${status.breakTime} min`;
+          else if (status.exitTime) timeInfo = status.exitTime;
+          else if (status.vacationType) timeInfo = status.vacationType;
+          else if (status.l4Type) timeInfo = status.l4Type + ' (do ' + status.l4DateTo + ')';
+          else if (status.dayOffType) timeInfo = status.dayOffType;           // ← NOWE
+          else if (status.occasionalType) timeInfo = status.occasionalType;   // ← NOWE
+          
+          html += `
+            <tr>
+              <td>${shiftKey}</td>
+              <td>${status.icon || ''} ${worker.login}</td>
+              <td>${worker.name}</td>
+              <td>${status.currentDepartment || worker.dept || '---'}</td>
+              <td><span class="status-badge ${statusClass}">${status.statusText || 'NIEOBECNY'}</span></td>
+              <td>${timeInfo}</td>
+            </tr>
+          `;
+        });
+      });
+      
+      html += '</tbody></table>';
+      return html;
+    }
+    
+    function showError(error) {
+      console.error('Błąd:', error);
+      document.getElementById('dashboard-content').innerHTML = `
+        <div class="error">
+          ⚠️ Błąd ładowania danych: ${error.message}
+        </div>
+      `;
+    }
+    
+    // Start przy załadowaniu strony
+    window.onload = startAutoRefresh;
+
+    /**
+ * Ładuje historię nieobecności
+ */
+function loadAbsenceHistory(days = null) {
+  console.log('Ładowanie historii nieobecności, dni:', days);
+  
+  google.script.run
+    .withSuccessHandler(function(history) {
+      renderAbsenceHistory(history, days);
+    })
+    .withFailureHandler(function(error) {
+      console.error('Błąd ładowania historii:', error);
+      document.getElementById('absence-history-container').innerHTML = `
+        <div class="error">⚠️ Błąd ładowania historii: ${error.message}</div>
+      `;
+    })
+    .getAbsenceHistory(days);
+}
+/**
+ * Renderuje historię nieobecności
+ */
+function renderAbsenceHistory(history, selectedDays = null) {
+  console.log('=== RENDEROWANIE HISTORII ===');
+  console.log('Liczba nieobecności:', history.absences.length);
+  console.log('Pierwsze 5 nieobecności:', history.absences.slice(0, 5));
+  console.log('============================');
+  console.log('Historia otrzymana:', history);
+  
+  let html = '';
+  
+  // Filtry
+  html += `
+  <div class="absence-filters">
+    <select id="absencePeriodFilter">
+  <option value="7" ${selectedDays === 7 ? 'selected' : ''}>Ostatnie 7 dni</option>
+  <option value="14" ${selectedDays === 14 ? 'selected' : ''}>Ostatnie 14 dni</option>
+  <option value="30" ${selectedDays === 30 ? 'selected' : ''}>Ostatnie 30 dni</option>
+  <option value="60" ${selectedDays === 60 ? 'selected' : ''}>Ostatnie 60 dni</option>
+  <option value="90" ${selectedDays === 90 ? 'selected' : ''}>Ostatnie 90 dni</option>
+  <option value="null" ${selectedDays === null ? 'selected' : ''}>Wszystkie (z arkusza Logi)</option>
+</select>
+    
+    <button onclick="refreshAbsenceHistory()" class="export-btn">
+      🔄 Odśwież historię
+    </button>
+      
+      <button onclick="exportAbsenceToExcel()" class="export-btn">
+        📥 Eksport do Excel
+      </button>
+      
+      <button onclick="exportAbsenceToPDF()" class="export-btn">
+        📄 Eksport do PDF
+      </button>
+    </div>
+  `;
+  
+  // Tabela
+  html += '<table class="absence-history-table">';
+  html += `
+    <thead>
+      <tr>
+        <th>Data</th>
+        <th>Dni</th>
+        <th>Pracownik</th>
+        <th>Typ</th>
+        <th>Szczegóły</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+  `;
+  
+  // Dzisiejsza data
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+history.absences.forEach(absence => {
+  const fromDate = new Date(absence.dateFrom);
+  fromDate.setHours(0, 0, 0, 0);
+  const toDate = new Date(absence.dateTo);
+  toDate.setHours(0, 0, 0, 0);
+  
+  // Pogrubienie tylko jeśli trwa DZIŚ
+  const isOngoingToday = today >= fromDate && today <= toDate;
+    
+    const rowClass = `absence-${absence.type}${isOngoingToday ? ' current-week' : ''}`;
+    
+    const dateRange = absence.dateFrom === absence.dateTo 
+      ? formatDate(absence.dateFrom)
+      : `${formatDate(absence.dateFrom)}-${formatDate(absence.dateTo)}`;
+    
+    const daysText = absence.days > 0 ? absence.days : '-';
+    
+    html += `
+      <tr class="${rowClass}">
+        <td>${dateRange}</td>
+        <td>${daysText}</td>
+        <td>${absence.name}</td>
+        <td>${absence.typeText}</td>
+        <td>${absence.details}</td>
+        <td>${absence.status}</td>
+      </tr>
+    `;
+  });
+  
+  html += '</tbody></table>';
+  
+  // Statystyki
+  const startDate = new Date(history.stats.periodStart);
+  const endDate = new Date(history.stats.periodEnd);
+  const daysDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+
+  html += `
+    <div class="absence-stats">
+      <h3>📊 PODSUMOWANIE (ostatnie ${daysDiff} dni):</h3>
+      <p>
+        • Dni urlopowe: <strong>${history.stats.totalVacationDays}</strong> &nbsp;&nbsp;
+        • Dni L4: <strong>${history.stats.totalL4Days}</strong> &nbsp;&nbsp;
+        • Dni wolne: <strong>${history.stats.totalDayOffDays || 0}</strong> &nbsp;&nbsp;
+        • Urlopy okolicznościowe: <strong>${history.stats.totalOccasionalDays || 0}</strong> &nbsp;&nbsp;
+        • Dni nieusprawiedliwione: <strong>${history.stats.totalUnjustifiedDays}</strong>
+      </p>
+    </div>
+  `;
+  
+  document.getElementById('absence-history-container').innerHTML = html;
+}
+
+/**
+ * Pomocnicze funkcje
+ */
+function getMonday(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  return new Date(d.setDate(diff));
+}
+
+function formatDate(dateStr) {
+  const parts = dateStr.split('-');
+  return `${parts[2]}.${parts[1]}.${parts[0]}`;
+}
+
+function exportAbsenceToExcel() {
+  const select = document.getElementById('absencePeriodFilter');
+  const days = select.value === 'null' ? null : parseInt(select.value);
+  
+  const btn = event.target;
+  const originalText = btn.textContent;
+  btn.textContent = '⏳ Generowanie Excel...';
+  btn.disabled = true;
+  
+  console.log('Rozpoczynam eksport do Excel, dni:', days);
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      console.log('Wynik eksportu Excel:', result);
+      
+      btn.textContent = originalText;
+      btn.disabled = false;
+      
+      if (result.success) {
+        // Otwórz plik do pobrania
+        const downloadWindow = window.open(result.downloadUrl, '_blank');
+        
+        if (!downloadWindow) {
+          // Popup zablokowany - pokaż link
+          showDownloadLink(result, 'Excel');
+        } else {
+          showNotification(`✅ Excel wygenerowany: ${result.fileName}`, 'success');
+        }
+      } else {
+        showNotification(`❌ ${result.message}`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('Błąd eksportu Excel:', error);
+      
+      btn.textContent = originalText;
+      btn.disabled = false;
+      
+      showNotification('❌ Błąd: ' + error.message, 'error');
+    })
+    .exportAbsenceHistoryToExcel(days);
+}
+
+/**
+ * Eksportuje historię nieobecności do PDF
+ */
+function exportAbsenceToPDF() {
+  const select = document.getElementById('absencePeriodFilter');
+  const days = select.value === 'null' ? null : parseInt(select.value);
+  
+  const btn = event.target;
+  const originalText = btn.textContent;
+  btn.textContent = '⏳ Generowanie PDF...';
+  btn.disabled = true;
+  
+  console.log('Rozpoczynam eksport do PDF, dni:', days);
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      console.log('Wynik eksportu PDF:', result);
+      
+      btn.textContent = originalText;
+      btn.disabled = false;
+      
+      if (result.success) {
+        // ✅ ULEPSZONE - Pokazujemy więcej opcji
+        showPDFDownloadOptions(result);
+      } else {
+        showNotification(`❌ ${result.message}`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('Błąd eksportu PDF:', error);
+      
+      btn.textContent = originalText;
+      btn.disabled = false;
+      
+      showNotification('❌ Błąd: ' + error.message, 'error');
+    })
+    .exportAbsenceHistoryToPDF(days);
+}
+
+/**
+ * Pokazuje opcje pobierania/podglądu PDF
+ */
+function showPDFDownloadOptions(result) {
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  `;
+  
+  const content = document.createElement('div');
+  content.style.cssText = `
+    background: white;
+    padding: 30px;
+    border-radius: 15px;
+    max-width: 500px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  `;
+  
+  content.innerHTML = `
+    <h2 style="margin: 0 0 20px 0; color: #333;">
+      ✅ PDF wygenerowany pomyślnie!
+    </h2>
+    
+    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+      <strong>Nazwa pliku:</strong><br>
+      <span style="color: #667eea; font-family: monospace;">${result.fileName}</span>
+    </div>
+    
+    <div style="margin-bottom: 20px; color: #666;">
+      <p style="margin: 5px 0;">📂 <strong>Lokalizacja:</strong> Google Drive (główny folder)</p>
+      <p style="margin: 5px 0;">🔗 <strong>Uprawnienia:</strong> Wszyscy z linkiem mogą przeglądać</p>
+    </div>
+    
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <a href="${result.downloadUrl}" target="_blank" 
+         style="display: block; background: #4caf50; color: white; padding: 12px 20px; 
+                text-align: center; text-decoration: none; border-radius: 8px; font-weight: bold;">
+        📥 Pobierz PDF
+      </a>
+      
+      <a href="${result.viewUrl || result.downloadUrl}" target="_blank"
+         style="display: block; background: #2196f3; color: white; padding: 12px 20px; 
+                text-align: center; text-decoration: none; border-radius: 8px; font-weight: bold;">
+        👁️ Podgląd w Google Drive
+      </a>
+      
+      ${result.folderUrl ? `
+        <a href="${result.folderUrl}" target="_blank"
+           style="display: block; background: #ff9800; color: white; padding: 12px 20px; 
+                  text-align: center; text-decoration: none; border-radius: 8px; font-weight: bold;">
+          📂 Otwórz folder w Drive
+        </a>
+      ` : ''}
+      
+      <button onclick="this.closest('div[style*=fixed]').remove()" 
+              style="background: #9e9e9e; color: white; border: none; padding: 12px 20px; 
+                     border-radius: 8px; cursor: pointer; font-weight: bold;">
+        Zamknij
+      </button>
+    </div>
+  `;
+  
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+  
+  // Zamknij po kliknięciu w tło
+  modal.addEventListener('click', function(e) {
+    if (e.target === modal) {
+      modal.remove();
+    }
+  });
+}
+
+/**
+ * Pokazuje link do pobrania gdy popup jest zablokowany
+ */
+function showDownloadLink(result, fileType) {
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  `;
+  
+  const content = document.createElement('div');
+  content.style.cssText = `
+    background: white;
+    padding: 30px;
+    border-radius: 15px;
+    max-width: 500px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  `;
+  
+  content.innerHTML = `
+    <h2 style="margin: 0 0 20px 0; color: #f44336;">
+      ⚠️ Wyskakujące okno zablokowane
+    </h2>
+    
+    <p style="margin-bottom: 20px;">
+      Twoja przeglądarka zablokowała automatyczne pobranie. 
+      Kliknij poniższy przycisk aby pobrać plik:
+    </p>
+    
+    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+      <strong>Nazwa pliku:</strong><br>
+      <span style="color: #667eea; font-family: monospace;">${result.fileName}</span>
+    </div>
+    
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <a href="${result.downloadUrl}" target="_blank"
+         style="display: block; background: #4caf50; color: white; padding: 15px 25px; 
+                text-align: center; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 1.1em;">
+        📥 Pobierz ${fileType}
+      </a>
+      
+      <button onclick="this.closest('div[style*=fixed]').remove()" 
+              style="background: #9e9e9e; color: white; border: none; padding: 12px 20px; 
+                     border-radius: 8px; cursor: pointer; font-weight: bold;">
+        Zamknij
+      </button>
+    </div>
+  `;
+  
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+  
+  modal.addEventListener('click', function(e) {
+    if (e.target === modal) {
+      modal.remove();
+    }
+  });
+}
+
+/**
+ * Wyświetla powiadomienie
+ */
+function showNotification(message, type) {
+  const notification = document.createElement('div');
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 15px 25px;
+    background: ${type === 'success' ? '#4caf50' : '#f44336'};
+    color: white;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    z-index: 9999;
+    font-weight: bold;
+    font-size: 1.1em;
+    max-width: 400px;
+    word-wrap: break-word;
+  `;
+  
+  notification.textContent = message;
+  document.body.appendChild(notification);
+  
+  setTimeout(() => {
+    notification.remove();
+  }, 5000);
+}
+
+/**
+ * Odświeża historię z zachowaniem wybranego filtra
+ */
+function refreshAbsenceHistory() {
+  const select = document.getElementById('absencePeriodFilter');
+  const days = select.value === 'null' ? null : parseInt(select.value);
+  
+  document.getElementById('absence-history-container').innerHTML = 
+    '<div class="loading">⏳ Odświeżanie historii...</div>';
+  
+  loadAbsenceHistory(days);
+}
+</script>
+</body>
+</html>

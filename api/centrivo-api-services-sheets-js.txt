@@ -1,0 +1,3205 @@
+const { google } = require("googleapis");
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const EMPLOYEES_SHEET = process.env.SHEETS_EMPLOYEES_SHEET || "employees";
+const LOGS_SHEET = process.env.SHEETS_LOGS_SHEET || "logs";
+const SHIFTS_SHEET = process.env.SHEETS_SHIFTS_SHEET || "Pracownicy";
+const ANNOUNCEMENTS_SHEET = process.env.SHEETS_ANNOUNCEMENTS_SHEET || "Ogloszenia_API";
+const ANNOUNCEMENTS_READ_SHEET = process.env.SHEETS_ANNOUNCEMENTS_READ_SHEET || "Ogloszenia_odczyty_API";
+const VACATION_SHEET = process.env.SHEETS_VACATION_SHEET || "Wnioski_urlopowe";
+const L4_SHEET = process.env.SHEETS_L4_SHEET || "Zwolnienia_lekarskie";
+const DAYOFF_SHEET = process.env.SHEETS_DAYOFF_SHEET || "Dni_wolne";
+const OCCASIONAL_SHEET = process.env.SHEETS_OCCASIONAL_SHEET || "Urlopy_okolicznosciowe";
+const YEAR_PLAN_SHEET = process.env.SHEETS_YEAR_PLAN_SHEET || "Plan_roczny";
+
+function getAuth() {
+  if (!process.env.GOOGLE_CLIENT_EMAIL) throw new Error("Brak GOOGLE_CLIENT_EMAIL");
+  if (!process.env.GOOGLE_PRIVATE_KEY) throw new Error("Brak GOOGLE_PRIVATE_KEY");
+  if (!SPREADSHEET_ID) throw new Error("Brak SPREADSHEET_ID");
+
+  return new google.auth.GoogleAuth({
+    credentials: {
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    },
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+
+async function getSheetsClient() {
+  const auth = getAuth();
+  return google.sheets({ version: "v4", auth });
+}
+
+async function getEmployeeByCode(code) {
+  const sheets = await getSheetsClient();
+
+  const range = `${EMPLOYEES_SHEET}!A2:F`;
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+  });
+
+  const rows = resp.data.values || [];
+  const clean = String(code).replace(/\s/g, "");
+
+  for (let i = 0; i < rows.length; i++) {
+    const [id, name, rowCode, department, status, currentDepartment] = rows[i];
+    if (!rowCode) continue;
+
+    const rowCodeClean = String(rowCode).replace(/\s/g, "");
+    if (rowCodeClean === clean) {
+      return {
+        id: String(id),
+        name: String(name || ""),
+        code: rowCodeClean,
+        baseDepartment: String(department || ""),
+        currentDepartment: String(currentDepartment || ""),
+        department: String(currentDepartment || department || ""), // dla kompatybilności
+        status: String(status || "OUT"),
+        rowIndex: i + 2, // bo start od A2
+      };
+    }
+  }
+
+  return null;
+}
+
+async function updateEmployeeStatus(rowIndex, newStatus) {
+  const sheets = await getSheetsClient();
+  const range = `${EMPLOYEES_SHEET}!E${rowIndex}`; // kolumna status
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+    valueInputOption: "RAW",
+    requestBody: { values: [[newStatus]] },
+  });
+
+  return true;
+}
+
+async function updateEmployeeDepartment(rowIndex, newDepartment) {
+  const sheets = await getSheetsClient();
+  const range = `${EMPLOYEES_SHEET}!F${rowIndex}`; // kolumna currentDepartment
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+    valueInputOption: "RAW",
+    requestBody: { values: [[String(newDepartment || "")]] },
+  });
+
+  return true;
+}
+
+async function addLog(employeeId, type, department) {
+  const sheets = await getSheetsClient();
+
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${LOGS_SHEET}!A2:A`,
+  });
+
+  const existing = (idResp.data.values || []).length;
+  const nextId = existing + 1;
+
+  const row = [
+  String(nextId),
+  String(employeeId),
+  String(type),
+  formatDateTimeWarsaw(new Date()),
+  String(department || ""),
+];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${LOGS_SHEET}!A:E`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return true;
+}
+
+function formatDatePL(value) {
+  // value może być "2026-02-15", Date albo coś z Sheets
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(d.getFullYear());
+  return `${dd}.${mm}.${yyyy}`;
+}
+
+function formatDateTimeWarsaw(d = new Date()) {
+  // "YYYY-MM-DD HH:mm:ss" w strefie Europe/Warsaw
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Warsaw",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+
+  const map = {};
+  parts.forEach(p => { if (p.type !== "literal") map[p.type] = p.value; });
+
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
+function formatTimeWarsaw(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "Europe/Warsaw",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(val);
+  }
+  // jeśli już string typu "07:00" / "7:00" / "07:00:00"
+  const s = String(val).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) return `${String(m[1]).padStart(2,"0")}:${m[2]}`;
+  return s;
+}
+
+function normHeader(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/ą/g,'a').replace(/ć/g,'c').replace(/ę/g,'e').replace(/ł/g,'l')
+    .replace(/ń/g,'n').replace(/ó/g,'o').replace(/ś/g,'s').replace(/ż/g,'z').replace(/ź/g,'z')
+    .replace(/\s+/g,'_');
+}
+
+function parseLogTimestampToDate(v) {
+  if (v instanceof Date) return v;
+
+  const s = String(v || "").trim();
+  if (!s) return null;
+
+  // ISO (stare wpisy)
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  // "YYYY-MM-DD HH:mm:ss" (nowe wpisy)
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]), da = Number(m[3]);
+    const hh = Number(m[4]), mi = Number(m[5]), ss = Number(m[6]);
+
+    // konwersja "Warsaw local" -> Date(UTC) bez bibliotek
+    const guessUtc = new Date(Date.UTC(y, mo - 1, da, hh, mi, ss));
+    const offsetMs = getTimeZoneOffsetMs(guessUtc, "Europe/Warsaw");
+    return new Date(guessUtc.getTime() - offsetMs);
+  }
+
+  // awaryjnie
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function fmtHM_Warsaw(d) {
+  if (!d) return "";
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Warsaw",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
+function diffMinutes(a, b) {
+  return Math.floor((a.getTime() - b.getTime()) / 60000);
+}
+
+function buildWorkSummaryForDay(logsSorted, now = new Date()) {
+  // logsSorted: [{ type, ts, dept }]
+  let firstEntry = null;
+  let lastExit = null;
+
+  // stan dnia
+  let state = "OUT"; // OUT | WORK | BREAK
+  let segStart = null;
+
+  let workMinutes = 0;
+
+  const isWorkStart = (t) => t === "ENTRY" || t === "BREAK_END";
+  const isBreakStart = (t) => t === "BREAK_START";
+  const isBreakEnd = (t) => t === "BREAK_END";
+  const isExit = (t) => t === "EXIT";
+
+  for (const ev of logsSorted) {
+    const t = String(ev.type || "").trim().toUpperCase();
+    const ts = ev.ts instanceof Date ? ev.ts : null;
+    if (!ts) continue;
+
+    if (t === "ENTRY" && !firstEntry) firstEntry = ts;
+    if (t === "EXIT") lastExit = ts;
+
+    if (t === "CHANGE_DEPT") continue;
+
+    // OUT -> ENTRY zaczyna pracę
+    if (state === "OUT") {
+      if (t === "ENTRY") {
+        state = "WORK";
+        segStart = ts;
+      }
+      continue;
+    }
+
+    // WORK -> BREAK_START kończy odcinek pracy
+    if (state === "WORK") {
+      if (isBreakStart(t)) {
+        if (segStart) workMinutes += Math.max(0, diffMinutes(ts, segStart));
+        state = "BREAK";
+        segStart = ts;
+        continue;
+      }
+      if (isExit(t)) {
+        if (segStart) workMinutes += Math.max(0, diffMinutes(ts, segStart));
+        state = "OUT";
+        segStart = null;
+        continue;
+      }
+      // kolejne ENTRY w WORK ignorujemy
+      continue;
+    }
+
+    // BREAK -> BREAK_END wraca do pracy
+    if (state === "BREAK") {
+      if (isBreakEnd(t)) {
+        state = "WORK";
+        segStart = ts;
+        continue;
+      }
+      if (isExit(t)) {
+        // wychodzi z pracy będąc na przerwie -> koniec przerwy, pracy nie doliczamy
+        state = "OUT";
+        segStart = null;
+        continue;
+      }
+      continue;
+    }
+  }
+
+  // jeśli nadal pracuje (albo jest na przerwie), domykamy do "teraz"
+  if (state === "WORK" && segStart) {
+    workMinutes += Math.max(0, diffMinutes(now, segStart));
+  }
+
+  // statusSinceHM: zależy od ostatniego eventu / stanu
+  const last = logsSorted.length ? logsSorted[logsSorted.length - 1] : null;
+  const lastType = String(last?.type || "").trim().toUpperCase();
+  const lastTs = last?.ts instanceof Date ? last.ts : null;
+
+  // znajdź “od kiedy” dla WORK/BREAK
+  let statusSince = null;
+
+  if (lastTs) {
+    if (lastType === "EXIT") {
+      statusSince = lastTs; // do WYJŚCIE
+    } else if (lastType === "BREAK_START") {
+      statusSince = lastTs;
+    } else if (isWorkStart(lastType)) {
+      statusSince = lastTs;
+    } else {
+      // np. CHANGE_DEPT – bierzemy ostatni “znaczący” event
+      for (let i = logsSorted.length - 1; i >= 0; i--) {
+        const t = String(logsSorted[i].type || "").trim().toUpperCase();
+        const ts = logsSorted[i].ts instanceof Date ? logsSorted[i].ts : null;
+        if (!ts) continue;
+        if (t === "EXIT" || t === "BREAK_START" || t === "BREAK_END" || t === "ENTRY") {
+          statusSince = ts;
+          break;
+        }
+      }
+    }
+  }
+
+  // sinceText gotowy do UI
+  let sinceText = "";
+  if (lastType === "EXIT" && lastTs) {
+    sinceText = `WYJŚCIE ${fmtHM_Warsaw(lastTs)}`;
+  } else if (lastType === "BREAK_START" && statusSince) {
+    sinceText = `przerwa od ${fmtHM_Warsaw(statusSince)}`;
+  } else if (statusSince) {
+    sinceText = `od ${fmtHM_Warsaw(statusSince)}`;
+  }
+
+  return {
+    firstEntryHM: firstEntry ? fmtHM_Warsaw(firstEntry) : "",
+    lastExitHM: lastExit ? fmtHM_Warsaw(lastExit) : "",
+    workMinutes: Math.max(0, Number(workMinutes) || 0),
+    statusSinceHM: statusSince ? fmtHM_Warsaw(statusSince) : "",
+    lastEventLabel: lastType || "",
+    sinceText,
+    hasAnyEntryToday: !!firstEntry,
+  };
+}
+
+function getTimeZoneOffsetMs(date, timeZone) {
+  // zwraca offset strefy dla danego "date" (w ms)
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  const map = {};
+  parts.forEach(p => { if (p.type !== "literal") map[p.type] = p.value; });
+
+  const asUTC = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour),
+    Number(map.minute),
+    Number(map.second)
+  );
+
+  return asUTC - date.getTime();
+}
+
+function warsawDateKey(d) {
+  // YYYY-MM-DD w Europe/Warsaw
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Warsaw",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const map = {};
+  parts.forEach(p => { if (p.type !== "literal") map[p.type] = p.value; });
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function fmtHM(d) {
+  // HH:mm w Europe/Warsaw
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Warsaw",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
+function fmtDuration(mins) {
+  const m = Math.max(0, Math.floor(mins));
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (h <= 0) return `${r}m`;
+  return `${h}h ${r}m`;
+}
+
+function normalizeTimeCell(v){
+  // Sheets API zwykle daje już "HH:MM", ale zabezpieczmy
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  // jeśli jest w formacie HH:MM lub H:MM -> zostaw
+  if (/^\d{1,2}:\d{2}$/.test(s)) return s.padStart(5, "0");
+  return s;
+}
+
+async function getShiftMap(){
+  const sheets = await getSheetsClient();
+
+  // bierzemy nagłówki + dane, szeroko żeby złapać Godz_start/Godz_koniec
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:K`,
+  });
+
+  const values = resp.data.values || [];
+  if (!values.length) return new Map();
+
+  const headers = values[0] || [];
+  const h = headers.map(normHeader);
+
+  const idxLogin = h.indexOf("login");
+  const idxStart = h.indexOf("godz_start");
+  const idxEnd   = h.indexOf("godz_koniec");
+
+  if (idxLogin === -1 || idxStart === -1 || idxEnd === -1) return new Map();
+
+  const map = new Map();
+  for (let i = 1; i < values.length; i++){
+    const row = values[i] || [];
+    const login = String(row[idxLogin] || "").trim();
+    if (!login) continue;
+
+    const start = normalizeTimeCell(row[idxStart]);
+    const end   = normalizeTimeCell(row[idxEnd]);
+
+    map.set(login, { start, end });
+  }
+  return map;
+}
+
+async function getWorkforceLiveSnapshot() {
+  const sheets = await getSheetsClient();
+
+  // 1) pracownicy (czytamy po nagłówkach, żeby nie zgadywać kolumn)
+  const empResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${EMPLOYEES_SHEET}!A1:Z`,
+  });
+
+  const empAll = empResp.data.values || [];
+  const headerRow = (empAll[0] || []).map(normHeader);
+  const empRows = empAll.slice(1);
+
+  const idxLogin =
+    headerRow.indexOf("login") >= 0 ? headerRow.indexOf("login")
+    : headerRow.indexOf("id") >= 0 ? headerRow.indexOf("id")
+    : headerRow.indexOf("employeeid") >= 0 ? headerRow.indexOf("employeeid")
+    : 0;
+
+  const idxName =
+    headerRow.indexOf("name") >= 0 ? headerRow.indexOf("name")
+    : headerRow.indexOf("imie_i_nazwisko") >= 0 ? headerRow.indexOf("imie_i_nazwisko")
+    : headerRow.indexOf("imie_nazwisko") >= 0 ? headerRow.indexOf("imie_nazwisko")
+    : headerRow.indexOf("pracownik") >= 0 ? headerRow.indexOf("pracownik")
+    : 1;
+
+  const idxDept =
+    headerRow.indexOf("department") >= 0 ? headerRow.indexOf("department")
+    : headerRow.indexOf("dzial") >= 0 ? headerRow.indexOf("dzial")
+    : headerRow.findIndex(h => h.includes("dzial"));
+
+  const idxCurrentDept =
+    headerRow.indexOf("currentdepartment") >= 0 ? headerRow.indexOf("currentdepartment")
+    : headerRow.indexOf("biezacy_dzial") >= 0 ? headerRow.indexOf("biezacy_dzial")
+    : headerRow.indexOf("operacja") >= 0 ? headerRow.indexOf("operacja")
+    : headerRow.indexOf("current_department") >= 0 ? headerRow.indexOf("current_department")
+    : headerRow.findIndex(h => h.includes("current") && h.includes("dept"));
+
+  const idxStart =
+    headerRow.indexOf("godzina_start") >= 0 ? headerRow.indexOf("godzina_start")
+    : headerRow.indexOf("start") >= 0 ? headerRow.indexOf("start")
+    : headerRow.indexOf("starttime") >= 0 ? headerRow.indexOf("starttime")
+    : headerRow.findIndex(h => h.includes("godzina") && h.includes("start"));
+
+  const idxEnd =
+    headerRow.indexOf("godzina_koniec") >= 0 ? headerRow.indexOf("godzina_koniec")
+    : headerRow.indexOf("koniec") >= 0 ? headerRow.indexOf("koniec")
+    : headerRow.indexOf("end") >= 0 ? headerRow.indexOf("end")
+    : headerRow.indexOf("endtime") >= 0 ? headerRow.indexOf("endtime")
+    : headerRow.findIndex(h => h.includes("godzina") && (h.includes("koniec") || h.includes("end")));
+
+  const workers = empRows
+    .map(r => {
+      const login = String(r?.[idxLogin] || "").trim();
+      if (!login) return null;
+
+      const name = String(r?.[idxName] || "").trim();
+      const baseDept = idxDept >= 0 ? String(r?.[idxDept] || "").trim() : "";
+      const currentDept = idxCurrentDept >= 0 ? String(r?.[idxCurrentDept] || "").trim() : "";
+
+      const startRaw = idxStart >= 0 ? r?.[idxStart] : "";
+      const endRaw = idxEnd >= 0 ? r?.[idxEnd] : "";
+      const shiftStart = formatTimeWarsaw(startRaw);
+      const shiftEnd = formatTimeWarsaw(endRaw);
+
+      return {
+        login,
+        name,
+        baseDept,
+        currentDept,
+        shiftStart,
+        shiftEnd,
+      };
+    })
+    .filter(Boolean);
+    const shiftMap = await getShiftMap();
+
+
+  // 2) logi (A:id, B:employeeId/login, C:type, D:timestamp, E:department)
+  const logResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${LOGS_SHEET}!A2:E`,
+  });
+
+  const logRows = logResp.data.values || [];
+
+  const todayKey = warsawDateKey(new Date());
+
+  // map login -> logsToday[]
+  const logsByLogin = new Map();
+
+  for (const row of logRows) {
+    const login = String(row?.[1] || "").trim();
+    const type = String(row?.[2] || "").trim();
+    const tsRaw = row?.[3];
+    const dept = String(row?.[4] || "").trim();
+
+    if (!login || !type || !tsRaw) continue;
+
+    const ts = parseLogTimestampToDate(tsRaw);
+    if (!ts) continue;
+
+    if (warsawDateKey(ts) !== todayKey) continue;
+
+    const entry = { login, type, ts, dept };
+
+    if (!logsByLogin.has(login)) logsByLogin.set(login, []);
+    logsByLogin.get(login).push(entry);
+  }
+
+  // sortuj logi per login
+  for (const [login, arr] of logsByLogin.entries()) {
+    arr.sort((a, b) => a.ts - b.ts);
+    logsByLogin.set(login, arr);
+  }
+
+  const now = new Date();
+
+  const workSummaryByLogin = new Map();
+  for (const [login, arr] of logsByLogin.entries()) {
+   workSummaryByLogin.set(login, buildWorkSummaryForDay(arr, now));
+}
+
+  const rows = workers.map(w => {
+    const logs = logsByLogin.get(w.login) || [];
+    const ws = workSummaryByLogin.get(w.login) || null;
+
+    // domyślne
+    let status = "NIEOBECNY";
+    let deptNow = w.baseDept || "-";
+    let startInfo = "-";
+    let workInfo = "";
+    let breakInfo = "0m";
+    let alertType = "";     // na razie nie robimy ABSENT/LATE bez godzin zmian
+    let lateMinutes = 0;
+
+    if (!logs.length) {
+      return {
+        login: w.login,
+        name: w.name || w.login,
+        dept: deptNow,
+        shift: (shiftMap.get(w.login)?.start && shiftMap.get(w.login)?.end)
+          ? `${shiftMap.get(w.login).start}-${shiftMap.get(w.login).end}`
+          : "-",
+        status,
+        startInfo,
+        workInfo,
+        breakInfo,
+        alertType,
+        lateMinutes,
+    
+        sinceText: ws?.sinceText || "",
+        workSummary: ws,
+      };
+    }
+
+    // ostatni dept z logów (jeśli jest)
+    const lastWithDept = [...logs].reverse().find(x => x.dept);
+    if (lastWithDept?.dept) deptNow = lastWithDept.dept;
+
+    // status z ostatniej akcji
+    const last = logs[logs.length - 1];
+    const t = String(last.type || "").toUpperCase();
+
+    if (t === "ENTRY") status = "PRACUJE";
+    else if (t === "EXIT") status = "NIEOBECNY";
+    else if (t === "BREAK_START") status = "PRZERWA";
+    else if (t === "BREAK_END") status = "PRACUJE";
+    else if (t === "CHANGE_DEPT") {
+      // nie zmienia statusu – bierzemy poprzedni sensowny
+      const prev = [...logs].reverse().find(x => x.type !== "CHANGE_DEPT");
+      const tp = String(prev?.type || "").toUpperCase();
+      if (tp === "ENTRY") status = "PRACUJE";
+      else if (tp === "BREAK_START") status = "PRZERWA";
+      else if (tp === "BREAK_END") status = "PRACUJE";
+      else status = "NIEOBECNY";
+    }
+
+    // znajdź ostatnie ENTRY po ostatnim EXIT (start pracy)
+    let lastExitIdx = -1;
+    for (let i = logs.length - 1; i >= 0; i--) {
+      if (String(logs[i].type).toUpperCase() === "EXIT") { lastExitIdx = i; break; }
+    }
+    const sliceAfterExit = lastExitIdx >= 0 ? logs.slice(lastExitIdx + 1) : logs.slice();
+
+    const lastEntry = [...sliceAfterExit].reverse().find(x => String(x.type).toUpperCase() === "ENTRY");
+    if (lastEntry) {
+      const sinceMin = Math.floor((now - lastEntry.ts) / 60000);
+      startInfo = `Start: ${fmtHM(lastEntry.ts)} • ${fmtDuration(sinceMin)}`;
+    } else {
+      startInfo = `Ostatnio: ${fmtHM(last.ts)}`;
+    }
+
+    // policz pracę i przerwę dziś (prosto, z logów)
+    let workMin = 0;
+    let breakMin = 0;
+
+    let state = "OUT";        // OUT / WORK / BREAK
+    let segStart = null;
+
+    // ustaw stan startowy na podstawie pierwszego zdarzenia w sliceAfterExit
+    // (zaczynamy liczyć od ENTRY)
+    for (const e of sliceAfterExit) {
+      const tt = String(e.type).toUpperCase();
+
+      if (tt === "ENTRY") {
+        // start pracy
+        state = "WORK";
+        segStart = e.ts;
+      } else if (tt === "BREAK_START" && state === "WORK" && segStart) {
+        // domknij pracę -> start przerwy
+        workMin += Math.floor((e.ts - segStart) / 60000);
+        state = "BREAK";
+        segStart = e.ts;
+      } else if (tt === "BREAK_END" && state === "BREAK" && segStart) {
+        // domknij przerwę -> praca
+        breakMin += Math.floor((e.ts - segStart) / 60000);
+        state = "WORK";
+        segStart = e.ts;
+      } else if (tt === "EXIT" && segStart) {
+        // domknij aktualny segment i koniec
+        if (state === "WORK") workMin += Math.floor((e.ts - segStart) / 60000);
+        if (state === "BREAK") breakMin += Math.floor((e.ts - segStart) / 60000);
+        state = "OUT";
+        segStart = null;
+      }
+    }
+
+    // jeśli nadal trwa segment (WORK/BREAK) licz do teraz
+    if (segStart) {
+      if (state === "WORK") workMin += Math.floor((now - segStart) / 60000);
+      if (state === "BREAK") breakMin += Math.floor((now - segStart) / 60000);
+    }
+
+    breakInfo = fmtDuration(breakMin);
+    if (workMin > 0) workInfo = fmtDuration(workMin);
+
+    return {
+      login: w.login,
+      name: w.name || w.login,
+      dept: deptNow,
+      shift: (shiftMap.get(w.login)?.start && shiftMap.get(w.login)?.end)
+        ? `${shiftMap.get(w.login).start}-${shiftMap.get(w.login).end}`
+        : "-",
+      status,
+      startInfo,
+      workInfo,
+      breakInfo,
+      alertType,
+      lateMinutes,
+      sinceText: ws?.sinceText || "",
+      workSummary: ws,
+    };
+  });
+
+  // sort A-Z po nazwie
+  rows.sort((a, b) => String(a.name).localeCompare(String(b.name), "pl"));
+
+  return { rows };
+}
+
+async function getUnreadAnnouncements(loginPracownika) {
+  const sheets = await getSheetsClient();
+
+  // Ogloszenia: [id, dataDodania, dataWaznosci, typ, tresc, autor, odbiorcy]
+  const annResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_SHEET}!A2:G`,
+  });
+
+  // Odczyty: [idOgloszenia, login, data, godzina]
+  const readResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_READ_SHEET}!A2:D`,
+  });
+
+  const annRows = annResp.data.values || [];
+  const readRows = readResp.data.values || [];
+
+  const loginLower = String(loginPracownika).toLowerCase();
+
+  // IDs przeczytane przez tego pracownika
+  const readIds = new Set();
+  for (const row of readRows) {
+    const id = String(row?.[0] || "").trim();
+    const login = String(row?.[1] || "").trim().toLowerCase();
+    if (id && login === loginLower) readIds.add(id);
+  }
+
+  // dziś 00:00
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const unread = [];
+
+  for (const row of annRows) {
+    const id = String(row?.[0] || "").trim();
+    const dataWaznosciRaw = row?.[2];
+    const typ = String(row?.[3] || "info").trim();
+    const tresc = String(row?.[4] || "").trim();
+    const autor = String(row?.[5] || "").trim();
+    const odbiorcyRaw = String(row?.[6] || "").trim();
+
+    if (!id) continue;
+    if (!tresc) continue;
+
+    // ważność do końca dnia
+    const valid = new Date(dataWaznosciRaw);
+    if (Number.isNaN(valid.getTime())) continue;
+    valid.setHours(23, 59, 59, 999);
+    if (valid < today) continue;
+
+    // przeczytane?
+    if (readIds.has(id)) continue;
+
+    // odbiorcy
+    const odb = odbiorcyRaw || "WSZYSCY";
+    const dlaWszystkich = odb.toUpperCase() === "WSZYSCY";
+    const lista = odb
+      .toLowerCase()
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const dlaMnie = lista.includes(loginLower);
+
+    if (!(dlaWszystkich || dlaMnie)) continue;
+
+    unread.push({
+      id,
+      typ,
+      tresc,
+      autor,
+      dataWaznosci: formatDatePL(valid),
+    });
+  }
+
+  return unread;
+}
+
+async function markAnnouncementAsRead(idOgloszenia, loginPracownika) {
+  const sheets = await getSheetsClient();
+
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const data = `${yyyy}-${mm}-${dd}`;
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mi = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  const godzina = `${hh}:${mi}:${ss}`;
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_READ_SHEET}!A:D`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [[String(idOgloszenia), String(loginPracownika), data, godzina]],
+    },
+  });
+
+  return true;
+}
+
+async function listAnnouncementsForManager() {
+  const sheets = await getSheetsClient();
+
+  // Ogloszenia: [id, dataDodania, dataWaznosci, typ, tresc, autor, odbiorcy]
+  const annResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_SHEET}!A2:G`,
+  });
+
+  // Odczyty: [idOgloszenia, login, data, godzina]
+  const readResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_READ_SHEET}!A2:D`,
+  });
+
+  const annRows = annResp.data.values || [];
+  const readRows = readResp.data.values || [];
+
+  // policz odczyty per ogłoszenie
+  const readCountMap = new Map();
+  for (const row of readRows) {
+    const id = String(row?.[0] || "").trim();
+    if (!id) continue;
+    readCountMap.set(id, (readCountMap.get(id) || 0) + 1);
+  }
+
+  const result = [];
+
+  for (const row of annRows) {
+    const id = String(row?.[0] || "").trim();
+    const dataDodaniaRaw = row?.[1];
+    const dataWaznosciRaw = row?.[2];
+    const typ = String(row?.[3] || "info").trim();
+    const tresc = String(row?.[4] || "").trim();
+    const autor = String(row?.[5] || "").trim();
+    const odbiorcy = String(row?.[6] || "WSZYSCY").trim();
+
+    if (!id) continue;
+    if (!tresc) continue;
+
+    result.push({
+      id,
+      typ,
+      tresc,
+      autor,
+      odbiorcy,
+      dataDodania: formatDatePL(dataDodaniaRaw),
+      dataWaznosci: formatDatePL(dataWaznosciRaw),
+      readCount: Number(readCountMap.get(id) || 0),
+    });
+  }
+
+  // najnowsze na górze (po dataDodania, a jak brak to po kolei)
+  result.sort((a, b) => String(b.dataDodania).localeCompare(String(a.dataDodania)));
+
+  return result;
+}
+
+async function listEmployeesForRecipients() {
+  const sheets = await getSheetsClient();
+
+  // employees: [id(login), name, code, department, status, currentDepartment]
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${EMPLOYEES_SHEET}!A2:B`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const row of rows) {
+    const login = String(row?.[0] || "").trim();
+    const name  = String(row?.[1] || "").trim();
+    if (!login) continue;
+    out.push({ login, name: name || login });
+  }
+
+  // alfabetycznie po nazwie
+  out.sort((a, b) => a.name.localeCompare(b.name, "pl"));
+  return out;
+}
+
+async function createAnnouncement(typ, tresc, dataWaznosci, odbiorcy, autor) {
+  const sheets = await getSheetsClient();
+
+  // wylicz następne ID ANN-001
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_SHEET}!A2:A`,
+  });
+
+  const ids = (idResp.data.values || []).map(r => String(r?.[0] || "").trim());
+  let maxN = 0;
+  for (const id of ids) {
+    const m = /^ANN-(\d+)$/i.exec(id);
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    if (!Number.isNaN(n) && n > maxN) maxN = n;
+  }
+  const nextId = `ANN-${String(maxN + 1).padStart(3, "0")}`;
+
+  // dataDodania: YYYY-MM-DD
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const dataDodania = `${yyyy}-${mm}-${dd}`;
+
+  const row = [
+    nextId,
+    dataDodania,
+    String(dataWaznosci || ""),
+    String(typ || "info"),
+    String(tresc || ""),
+    String(autor || ""),
+    String(odbiorcy || "WSZYSCY"),
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${ANNOUNCEMENTS_SHEET}!A:G`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return { id: nextId };
+}
+
+async function getDashboardSnapshot() {
+  const snap = await getWorkforceLiveSnapshot();
+  const rows = Array.isArray(snap.rows) ? snap.rows : [];
+
+  const working = rows.filter(r => r.status === "PRACUJE").length;
+  const onBreak = rows.filter(r => r.status === "PRZERWA").length;
+  const absent  = rows.filter(r => r.status === "NIEOBECNY").length;
+
+  const present = working + onBreak;
+
+  // per dział: working / break / absent / present
+  const deptMap = new Map();
+  for (const r of rows) {
+    const dept = String(r.dept || "-").trim() || "-";
+    if (!deptMap.has(dept)) {
+      deptMap.set(dept, { dept, working: 0, onBreak: 0, absent: 0, present: 0 });
+    }
+    const d = deptMap.get(dept);
+
+    if (r.status === "PRACUJE") d.working += 1;
+    else if (r.status === "PRZERWA") d.onBreak += 1;
+    else if (r.status === "NIEOBECNY") d.absent += 1;
+
+    d.present = d.working + d.onBreak;
+  }
+
+  const perDepts = [...deptMap.values()].sort((a, b) => (b.present - a.present) || (b.working - a.working));
+  const depts = perDepts.map(x => x.dept);
+
+  // Top działy (pracuje)
+  const topDepts = [...deptMap.values()]
+    .map(d => ({ dept: d.dept, count: d.working }))
+    .filter(x => x.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6);
+
+  return {
+    working,
+    onBreak,
+    absent,
+    present,
+    depts,
+    perDepts,
+    topDepts,
+    timestamp: new Date().toISOString()
+  };
+}
+
+function warsawNowParts() {
+  // zwraca { dateISO: 'YYYY-MM-DD', hm: 'HH:mm', minutes: 0..1439 }
+  const now = new Date();
+  const dateISO = warsawDateKey(now);
+  const hm = fmtHM(now);
+  const m = hm.match(/^(\d{2}):(\d{2})$/);
+  const minutes = m ? (Number(m[1]) * 60 + Number(m[2])) : 0;
+  return { dateISO, hm, minutes };
+}
+
+function hmToMinutes(hm) {
+  const m = String(hm || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function dateToISOWarsaw(v){
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return "";
+  return warsawDateKey(d);
+}
+
+async function readSheetAll(sheets, sheetName, rangeA1){
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!${rangeA1}`,
+  });
+  return resp.data.values || [];
+}
+
+async function getAbsencesForDate(sheets, dateISO){
+  // vacation (zatwierdzony)
+  const vacationsRaw = await readSheetAll(sheets, VACATION_SHEET, "A2:I");
+  const vacationByLogin = new Map();
+  for (const r of vacationsRaw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo = r?.[5];
+    const status = String(r?.[7] || "").trim();
+    const type = String(r?.[8] || "Planowany").trim();
+
+    if (!login || !dateFrom || !dateTo) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (dateISO >= fromISO && dateISO <= toISO){
+      vacationByLogin.set(login, { type });
+    }
+  }
+
+  // L4 (wg DBK: decydują daty)
+  const l4Raw = await readSheetAll(sheets, L4_SHEET, "A2:I");
+  const l4ByLogin = new Map();
+  for (const r of l4Raw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[3];
+    const dateTo = r?.[4];
+    const type = String(r?.[7] || "Choroba").trim();
+    if (!login || !dateFrom || !dateTo) continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (dateISO >= fromISO && dateISO <= toISO){
+      l4ByLogin.set(login, { type, dateTo: toISO });
+    }
+  }
+
+  // DayOff (zatwierdzony, pojedyncza data)
+  const dayOffRaw = await readSheetAll(sheets, DAYOFF_SHEET, "A2:J");
+  const dayOffByLogin = new Map();
+  for (const r of dayOffRaw){
+    const login = String(r?.[1] || "").trim();
+    const day = r?.[4];
+    const type = String(r?.[5] || "Dzień wolny").trim();
+    const status = String(r?.[9] || "").trim();
+    if (!login || !day) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    const dayISO = dateToISOWarsaw(day);
+    if (dayISO === dateISO){
+      dayOffByLogin.set(login, { type });
+    }
+  }
+
+  // Occasional (zatwierdzony, zakres)
+  const occRaw = await readSheetAll(sheets, OCCASIONAL_SHEET, "A2:J");
+  const occByLogin = new Map();
+  for (const r of occRaw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo = r?.[5];
+    const type = String(r?.[7] || "Urlop okolicznościowy").trim();
+    const status = String(r?.[9] || "").trim();
+    if (!login || !dateFrom || !dateTo) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (dateISO >= fromISO && dateISO <= toISO){
+      occByLogin.set(login, { type });
+    }
+  }
+
+  return { vacationByLogin, l4ByLogin, dayOffByLogin, occByLogin };
+}
+
+function computeAlert(coverage){
+  if (coverage >= 80) return "🟢";
+  if (coverage >= 50) return "🟡";
+  return "🔴";
+}
+
+async function getDashboardFull({ dept = "ALL" } = {}) {
+  const sheets = await getSheetsClient();
+
+  const { dateISO, minutes: nowMin } = warsawNowParts();
+
+  // baza: LIVE (statusy + dept + work/break info)
+  const live = await getWorkforceLiveSnapshot();
+  const liveRows = Array.isArray(live.rows) ? live.rows : [];
+  const liveByLogin = new Map(liveRows.map(r => [String(r.login || "").trim(), r]));
+
+  // pracownicy + zmiany (ze SHIFTS_SHEET)
+  const shiftResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:K`,
+  });
+
+  const vals = shiftResp.data.values || [];
+  const headers = (vals[0] || []).map(normHeader);
+  const data = vals.slice(1);
+
+  const idxLogin = headers.indexOf("login");
+  const idxName  = headers.indexOf("imie_i_nazwisko") >= 0 ? headers.indexOf("imie_i_nazwisko")
+                 : headers.indexOf("imie_nazwisko") >= 0 ? headers.indexOf("imie_nazwisko")
+                 : headers.indexOf("name");
+  const idxDept  = headers.indexOf("dzial") >= 0 ? headers.indexOf("dzial") : headers.indexOf("department");
+  const idxStart = headers.indexOf("godz_start");
+  const idxEnd   = headers.indexOf("godz_koniec");
+
+  const workers = data.map(r => {
+    const login = String(r?.[idxLogin] || "").trim();
+    if (!login) return null;
+
+    const name = String(r?.[idxName] || login).trim();
+    const baseDept = String(r?.[idxDept] || "").trim();
+    const start = normalizeTimeCell(r?.[idxStart]);
+    const end   = normalizeTimeCell(r?.[idxEnd]);
+    return { login, name, dept: baseDept, start, end };
+  }).filter(Boolean);
+
+  // lista działów do filtra (z workers, nie z live)
+  let deptSet = new Set(workers.map(w => String(w.dept || '').trim()).filter(Boolean));
+
+if (deptSet.size === 0) {
+  // fallback: bierzemy działy z LIVE (żeby filtr zawsze działał)
+  for (const r of liveRows) {
+    const d = String(r.dept || '').trim();
+    if (d) deptSet.add(d);
+  }
+}
+
+const depts = [...deptSet].sort((a,b) => a.localeCompare(b));
+
+  // absencje na dziś
+  const { vacationByLogin, l4ByLogin, dayOffByLogin, occByLogin } = await getAbsencesForDate(sheets, dateISO);
+
+  // filtr działu: na planie (bazowy dept z Pracownicy)
+  const filteredWorkers = (dept && dept !== "ALL")
+    ? workers.filter(w => String(w.dept || "").trim() === dept)
+    : workers;
+
+  // grupowanie na zmiany
+  const shifts = {};
+  for (const w of filteredWorkers){
+    if (!w.start || !w.end) continue;
+    const key = `${w.start}-${w.end}`;
+    if (!shifts[key]){
+      shifts[key] = {
+        planned: [],
+        started: false,
+        present: 0,
+        onBreak: 0,
+        absent: 0,
+        vacation: 0,
+        l4: 0,
+        dayOff: 0,
+        occasional: 0,
+        left: 0,
+        coverage: 0,
+        alert: "⚪"
+      };
+    }
+    const liveRow = liveByLogin.get(String(w.login || "").trim()) || null;
+
+    shifts[key].planned.push({
+      login: w.login,
+      name: w.name,
+      dept: w.dept,
+    
+      // ✅ realne czasy z logów (z LIVE snapshot)
+      workSummary: liveRow?.workSummary || null,
+    });
+  }
+
+  // statusy per shift
+  for (const [shiftKey, shift] of Object.entries(shifts)){
+    const [st] = shiftKey.split("-");
+    const startMin = hmToMinutes(st);
+    shift.started = (startMin !== null) ? (nowMin >= startMin) : false;
+
+    for (const worker of shift.planned){
+      const login = String(worker.login || "").trim();
+
+      // absencje mają priorytet nad live
+      let currentStatus = null;
+
+      if (vacationByLogin.has(login)){
+        const v = vacationByLogin.get(login);
+        shift.vacation += 1;
+        currentStatus = { statusKey: "vacation", icon: "🏖️", statusText: "URLOP", vacationType: v.type };
+      } else if (l4ByLogin.has(login)){
+        const l = l4ByLogin.get(login);
+        shift.l4 += 1;
+        currentStatus = { statusKey: "l4", icon: "🏥", statusText: "L4", l4Type: l.type, l4DateTo: l.dateTo };
+      } else if (dayOffByLogin.has(login)){
+        const d = dayOffByLogin.get(login);
+        shift.dayOff += 1;
+        currentStatus = { statusKey: "dayoff", icon: "📅", statusText: "DZIEŃ WOLNY", dayOffType: d.type };
+      } else if (occByLogin.has(login)){
+        const o = occByLogin.get(login);
+        shift.occasional += 1;
+        currentStatus = { statusKey: "occasional", icon: "🎊", statusText: "URLOP OKOL.", occasionalType: o.type };
+      } else {
+        const lr = liveByLogin.get(login);
+        const st = String(lr?.status || "NIEOBECNY");
+
+        if (st === "PRACUJE"){
+          shift.present += 1;
+          currentStatus = {
+            statusKey: "working",
+            icon: "✅",
+            statusText: "PRACUJE",
+            currentDepartment: lr?.dept || worker.dept,
+            workTime: lr?.workInfo || ""
+          };
+        } else if (st === "PRZERWA"){
+          shift.present += 1;
+          shift.onBreak += 1;
+          currentStatus = {
+            statusKey: "break",
+            icon: "🟡",
+            statusText: "PRZERWA",
+            currentDepartment: lr?.dept || worker.dept,
+            breakTime: lr?.breakInfo || ""
+          };
+        } else {
+          shift.absent += 1;
+          currentStatus = {
+            statusKey: "absent",
+            icon: "❌",
+            statusText: "NIEOBECNY",
+            currentDepartment: lr?.dept || worker.dept
+          };
+        }
+      }
+
+      worker.currentStatus = currentStatus;
+    }
+
+    // coverage (jak w DBK: bez absencji planowych)
+    const totalWithoutAbs =
+      shift.planned.length - shift.vacation - shift.l4 - shift.dayOff - shift.occasional;
+
+    const denom = Math.max(0, totalWithoutAbs);
+    shift.coverage = denom > 0 ? Math.round((shift.present / denom) * 100) : 0;
+    shift.alert = shift.started ? computeAlert(shift.coverage) : "⚪";
+  }
+
+  // overall
+  let planned = 0, present = 0, absent = 0, vacation = 0, l4 = 0, dayOff = 0, occasional = 0, left = 0;
+  for (const s of Object.values(shifts)){
+    planned += s.planned.length;
+    present += s.present;
+    absent += s.absent;
+    vacation += s.vacation;
+    l4 += s.l4;
+    dayOff += s.dayOff;
+    occasional += s.occasional;
+    left += s.left;
+  }
+
+  const otherAbsences = dayOff + occasional;
+  const frekwencja = planned > 0 ? Math.round((present / planned) * 100) : 0;
+
+  // top działy (pracuje) z liveRows (filtr dept nie wpływa na top firmowe tylko przy ALL)
+  const topMap = new Map();
+  for (const r of liveRows){
+    if (String(r.status) !== "PRACUJE") continue;
+    if (dept && dept !== "ALL") {
+      // przy filtrze pokazujemy top jako 1 dział
+      continue;
+    }
+    const d = String(r.dept || "-").trim() || "-";
+    topMap.set(d, (topMap.get(d) || 0) + 1);
+  }
+  let topDepts = [...topMap.entries()].map(([dept, count]) => ({ dept, count }))
+    .sort((a,b) => b.count - a.count).slice(0, 6);
+
+  if (dept && dept !== "ALL"){
+    // zachowujemy sekcję “Top” jako 1 wiersz
+    const workCount = liveRows.filter(r => String(r.status) === "PRACUJE" && String(r.dept || "").trim() === dept).length;
+    topDepts = [{ dept, count: workCount }];
+  }
+
+  // sort shift keys
+  const sorted = Object.keys(shifts).sort((a,b) => a.localeCompare(b)).reduce((o,k) => { o[k]=shifts[k]; return o; }, {});
+
+  return {
+    timestamp: formatDateTimeWarsaw(new Date()),
+    depts,
+    deptActive: dept || "ALL",
+    overall: {
+      planned,
+      present,
+      absent,
+      vacation,
+      l4,
+      otherAbsences,
+      frekwencja,
+      left
+    },
+    shifts: sorted,
+    topDepts
+  };
+}
+
+async function getAbsenceHistory({ days = null, dept = "ALL" } = {}) {
+  const sheets = await getSheetsClient();
+  const { dateISO } = warsawNowParts();
+
+  // zakres: na start robimy +/-30 dni wokół dziś (jak w DBK) dla urlop/L4/dayOff/occasional
+  // a filtr "days" będzie ograniczał tylko “okno” wstecz/wprzód (bez nieusprawiedliwionych na razie)
+  const today = new Date(`${dateISO}T00:00:00`);
+  const start = new Date(today);
+  const end = new Date(today);
+
+  if (days === null){
+    start.setDate(start.getDate() - 30);
+    end.setDate(end.getDate() + 30);
+  } else {
+    start.setDate(start.getDate() - Math.max(1, Number(days)));
+    end.setDate(end.getDate() + 30);
+  }
+
+  const startISO = warsawDateKey(start);
+  const endISO = warsawDateKey(end);
+
+  // dept filter: potrzebujemy mapy login->dept z Pracownicy
+  const shiftResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:K`,
+  });
+  const vals = shiftResp.data.values || [];
+  const headers = (vals[0] || []).map(normHeader);
+  const data = vals.slice(1);
+  const idxLogin = headers.indexOf("login");
+  const idxDept  = headers.indexOf("dzial") >= 0 ? headers.indexOf("dzial") : headers.indexOf("department");
+  const loginDept = new Map();
+  for (const r of data){
+    const l = String(r?.[idxLogin] || "").trim();
+    if (!l) continue;
+    loginDept.set(l, String(r?.[idxDept] || "").trim());
+  }
+
+  function inDept(login){
+    if (!dept || dept === "ALL") return true;
+    return String(loginDept.get(login) || "").trim() === dept;
+  }
+
+  const absences = [];
+
+  // Vacations (zatwierdzone)
+  const vacationsRaw = await readSheetAll(sheets, VACATION_SHEET, "A2:I");
+  for (const r of vacationsRaw){
+    const login = String(r?.[1] || "").trim();
+    const name = String(r?.[2] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo = r?.[5];
+    const daysVal = Number(r?.[6] || 0);
+    const status = String(r?.[7] || "").trim();
+    const type = String(r?.[8] || "").trim();
+
+    if (!login || !dateFrom || !dateTo) continue;
+    if (status !== "Zatwierdzony") continue;
+    if (!inDept(login)) continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < startISO || fromISO > endISO) continue;
+
+    absences.push({
+      dateFrom: fromISO,
+      dateTo: toISO,
+      days: daysVal,
+      login,
+      name,
+      type: "vacation",
+      typeText: "🏖️ Urlop",
+      details: type || "Planowany",
+      status
+    });
+  }
+
+  // L4
+  const l4Raw = await readSheetAll(sheets, L4_SHEET, "A2:I");
+  for (const r of l4Raw){
+    const login = String(r?.[1] || "").trim();
+    const name = String(r?.[2] || "").trim();
+    const dateFrom = r?.[3];
+    const dateTo = r?.[4];
+    const daysVal = Number(r?.[5] || 0);
+    const status = String(r?.[6] || "").trim();
+    const type = String(r?.[7] || "").trim();
+
+    if (!login || !dateFrom || !dateTo) continue;
+    if (!inDept(login)) continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < startISO || fromISO > endISO) continue;
+
+    absences.push({
+      dateFrom: fromISO,
+      dateTo: toISO,
+      days: daysVal,
+      login,
+      name,
+      type: "l4",
+      typeText: "🏥 L4",
+      details: type || "Choroba",
+      status: status || "-"
+    });
+  }
+
+  // DayOff
+  const dayOffRaw = await readSheetAll(sheets, DAYOFF_SHEET, "A2:J");
+  for (const r of dayOffRaw){
+    const login = String(r?.[1] || "").trim();
+    const name = String(r?.[2] || "").trim();
+    const day = r?.[4];
+    const type = String(r?.[5] || "").trim();
+    const status = String(r?.[9] || "").trim();
+
+    if (!login || !day) continue;
+    if (!inDept(login)) continue;
+
+    const iso = dateToISOWarsaw(day);
+    if (iso < startISO || iso > endISO) continue;
+
+    absences.push({
+      dateFrom: iso,
+      dateTo: iso,
+      days: 1,
+      login,
+      name,
+      type: "dayoff",
+      typeText: "📅 Dzień wolny",
+      details: type || "Dzień wolny",
+      status: status || "-"
+    });
+  }
+
+  // Occasional
+  const occRaw = await readSheetAll(sheets, OCCASIONAL_SHEET, "A2:J");
+  for (const r of occRaw){
+    const login = String(r?.[1] || "").trim();
+    const name = String(r?.[2] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo = r?.[5];
+    const daysVal = Number(r?.[6] || 0);
+    const type = String(r?.[7] || "").trim();
+    const status = String(r?.[9] || "").trim();
+
+    if (!login || !dateFrom || !dateTo) continue;
+    if (!inDept(login)) continue;
+
+    const fromISO = dateToISOWarsaw(dateFrom);
+    const toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < startISO || fromISO > endISO) continue;
+
+    absences.push({
+      dateFrom: fromISO,
+      dateTo: toISO,
+      days: daysVal,
+      login,
+      name,
+      type: "occasional",
+      typeText: "🎊 Urlop okol.",
+      details: type || "Urlop okolicznościowy",
+      status: status || "-"
+    });
+  }
+
+  // sort: newest first
+  absences.sort((a,b) => String(b.dateFrom).localeCompare(String(a.dateFrom)));
+
+  // stats (prosto)
+  const stats = {
+    periodStart: startISO,
+    periodEnd: endISO,
+    totalVacationDays: absences.filter(a => a.type==="vacation").reduce((s,x)=>s+(Number(x.days)||0),0),
+    totalL4Days: absences.filter(a => a.type==="l4").reduce((s,x)=>s+(Number(x.days)||0),0),
+    totalDayOffDays: absences.filter(a => a.type==="dayoff").reduce((s,x)=>s+(Number(x.days)||0),0),
+    totalOccasionalDays: absences.filter(a => a.type==="occasional").reduce((s,x)=>s+(Number(x.days)||0),0),
+    totalUnjustifiedDays: 0 // na tym etapie nie liczymy “nieusprawiedliwionych” z logów
+  };
+
+  return { absences, stats };
+}
+
+async function getDashboardReport({ days = 7, dept = "ALL" } = {}) {
+  const sheets = await getSheetsClient();
+
+  const d = Math.max(1, Math.min(60, Number(days) || 7)); // bezpieczny limit
+  const { dateISO: todayISO } = warsawNowParts();
+
+  // okres: dziś i (days-1) dni wstecz (w kluczu YYYY-MM-DD)
+  const today = new Date(`${todayISO}T00:00:00`);
+  const start = new Date(today);
+  start.setDate(start.getDate() - (d - 1));
+
+  const periodStart = warsawDateKey(start);
+  const periodEnd   = warsawDateKey(today);
+
+  // helper: iteruj po dniach ISO (YYYY-MM-DD)
+  function addDaysISO(iso, add){
+    const dt = new Date(`${iso}T00:00:00`);
+    dt.setDate(dt.getDate() + add);
+    return warsawDateKey(dt);
+  }
+
+  // 1) Planowani: z SHIFTS_SHEET (login + dział)
+  const shiftResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:K`,
+  });
+
+  const vals = shiftResp.data.values || [];
+  const headers = (vals[0] || []).map(normHeader);
+  const data = vals.slice(1);
+
+  const idxLogin = headers.indexOf("login");
+  const idxDept  = headers.indexOf("dzial") >= 0 ? headers.indexOf("dzial") : headers.indexOf("department");
+
+  const plannedLoginsAll = data
+    .map(r => ({
+      login: String(r?.[idxLogin] || "").trim(),
+      dept:  String(r?.[idxDept]  || "").trim(),
+    }))
+    .filter(x => x.login);
+
+  const plannedLogins = (dept && dept !== "ALL")
+    ? plannedLoginsAll.filter(x => x.dept === dept).map(x => x.login)
+    : plannedLoginsAll.map(x => x.login);
+
+  const plannedSet = new Set(plannedLogins);
+
+  // 2) Logi: bierzemy ENTRY i mapujemy na dzień (Warsaw)
+  const logResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${LOGS_SHEET}!A2:E`,
+  });
+  const logRows = logResp.data.values || [];
+
+  // dateISO -> Set(login) którzy mieli ENTRY tego dnia
+  const entryByDate = new Map();
+
+  for (const row of logRows) {
+    const login = String(row?.[1] || "").trim();
+    const type = String(row?.[2] || "").trim().toUpperCase();
+    const tsRaw = row?.[3];
+
+    if (!login || !plannedSet.has(login)) continue;
+    if (type !== "ENTRY") continue;
+
+    const ts = parseLogTimestampToDate(tsRaw);
+    if (!ts) continue;
+
+    const dayKey = warsawDateKey(ts);
+    if (dayKey < periodStart || dayKey > periodEnd) continue;
+
+    if (!entryByDate.has(dayKey)) entryByDate.set(dayKey, new Set());
+    entryByDate.get(dayKey).add(login);
+  }
+
+  // 3) Absencje: czytamy arkusze RAZ (zamiast 4x na każdy dzień)
+  // mapy: dateISO -> Set(login)
+  const vacByDate = new Map();
+  const l4ByDate  = new Map();
+  const othByDate = new Map(); // dayOff + occasional
+
+  const clampStart = periodStart;
+  const clampEnd   = periodEnd;
+
+  function addLoginToMap(map, dateISO, login){
+    if (!map.has(dateISO)) map.set(dateISO, new Set());
+    map.get(dateISO).add(login);
+  }
+
+  // Vacation (zatwierdzony, zakres)
+  const vacationsRaw = await readSheetAll(sheets, VACATION_SHEET, "A2:I");
+  for (const r of vacationsRaw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo   = r?.[5];
+    const status   = String(r?.[7] || "").trim();
+    if (!login || !dateFrom || !dateTo) continue;
+    if (!plannedSet.has(login)) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    let fromISO = dateToISOWarsaw(dateFrom);
+    let toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < clampStart || fromISO > clampEnd) continue;
+
+    if (fromISO < clampStart) fromISO = clampStart;
+    if (toISO > clampEnd) toISO = clampEnd;
+
+    for (let cur = fromISO; cur <= toISO; cur = addDaysISO(cur, 1)){
+      addLoginToMap(vacByDate, cur, login);
+    }
+  }
+
+  // L4 (zakres)
+  const l4Raw = await readSheetAll(sheets, L4_SHEET, "A2:I");
+  for (const r of l4Raw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[3];
+    const dateTo   = r?.[4];
+    if (!login || !dateFrom || !dateTo) continue;
+    if (!plannedSet.has(login)) continue;
+
+    let fromISO = dateToISOWarsaw(dateFrom);
+    let toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < clampStart || fromISO > clampEnd) continue;
+
+    if (fromISO < clampStart) fromISO = clampStart;
+    if (toISO > clampEnd) toISO = clampEnd;
+
+    for (let cur = fromISO; cur <= toISO; cur = addDaysISO(cur, 1)){
+      addLoginToMap(l4ByDate, cur, login);
+    }
+  }
+
+  // DayOff (zatwierdzony, pojedyncza data)
+  const dayOffRaw = await readSheetAll(sheets, DAYOFF_SHEET, "A2:J");
+  for (const r of dayOffRaw){
+    const login = String(r?.[1] || "").trim();
+    const day   = r?.[4];
+    const status = String(r?.[9] || "").trim();
+    if (!login || !day) continue;
+    if (!plannedSet.has(login)) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    const dayISO = dateToISOWarsaw(day);
+    if (dayISO < clampStart || dayISO > clampEnd) continue;
+    addLoginToMap(othByDate, dayISO, login);
+  }
+
+  // Occasional (zatwierdzony, zakres)
+  const occRaw = await readSheetAll(sheets, OCCASIONAL_SHEET, "A2:J");
+  for (const r of occRaw){
+    const login = String(r?.[1] || "").trim();
+    const dateFrom = r?.[4];
+    const dateTo   = r?.[5];
+    const status   = String(r?.[9] || "").trim();
+    if (!login || !dateFrom || !dateTo) continue;
+    if (!plannedSet.has(login)) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    let fromISO = dateToISOWarsaw(dateFrom);
+    let toISO   = dateToISOWarsaw(dateTo);
+    if (toISO < clampStart || fromISO > clampEnd) continue;
+
+    if (fromISO < clampStart) fromISO = clampStart;
+    if (toISO > clampEnd) toISO = clampEnd;
+
+    for (let cur = fromISO; cur <= toISO; cur = addDaysISO(cur, 1)){
+      addLoginToMap(othByDate, cur, login);
+    }
+  }
+
+  // 4) Budowa wierszy raportu dzień po dniu (bez kolejnych odczytów z Sheets)
+  const rows = [];
+
+  for (let i = 0; i < d; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+    const dateISO = warsawDateKey(day);
+
+    const vacSet = vacByDate.get(dateISO) || new Set();
+    const l4Set  = l4ByDate.get(dateISO)  || new Set();
+    const othSet = othByDate.get(dateISO) || new Set();
+
+    let vacation = 0, l4 = 0, other = 0;
+
+    for (const login of plannedSet) {
+      if (vacSet.has(login)) vacation++;
+      else if (l4Set.has(login)) l4++;
+      else if (othSet.has(login)) other++;
+    }
+
+    const planned = plannedSet.size;
+    const plannedAvailable = Math.max(0, planned - vacation - l4 - other);
+
+    const entrySet = entryByDate.get(dateISO) || new Set();
+    let present = 0;
+
+    for (const login of plannedSet) {
+      if (vacSet.has(login)) continue;
+      if (l4Set.has(login)) continue;
+      if (othSet.has(login)) continue;
+      if (entrySet.has(login)) present++;
+    }
+
+    const absentNoLogin = Math.max(0, plannedAvailable - present);
+    const frekw = plannedAvailable > 0 ? Math.round((present / plannedAvailable) * 100) : 0;
+
+    rows.push({
+      date: dateISO,
+      planned,
+      absentNoLogin,
+      vacation,
+      l4,
+      other,
+      frekw,
+    });
+  }
+
+  rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+
+  return { periodStart, periodEnd, rows };
+}
+
+async function getActiveEmployees() {
+  const snap = await getWorkforceLiveSnapshot();
+  const rows = Array.isArray(snap.rows) ? snap.rows : [];
+
+  const working = rows
+    .filter(r => r.status === "PRACUJE")
+    .map(r => ({ name: r.name, login: r.login, operation: r.dept }));
+
+  const onBreak = rows
+    .filter(r => r.status === "PRZERWA")
+    .map(r => ({ name: r.name, login: r.login, operation: r.dept }));
+
+  return { working, onBreak };
+}
+
+function formatISODateWarsaw(d = new Date()) {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Warsaw",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const map = {};
+  parts.forEach(p => { if (p.type !== "literal") map[p.type] = p.value; });
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function safeNumber(v, def = 0) {
+  const n = Number(String(v ?? "").replace(",", ".").trim());
+  return Number.isFinite(n) ? n : def;
+}
+
+async function getEmployeeByLogin(loginRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return null;
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${EMPLOYEES_SHEET}!A2:F`,
+  });
+
+  const rows = resp.data.values || [];
+  for (let i = 0; i < rows.length; i++) {
+    const [id, name, code, department, status, currentDepartment] = rows[i];
+    if (String(id || "").trim() === login) {
+      return {
+        login: String(id || "").trim(),
+        name: String(name || "").trim(),
+        rowIndex: i + 2,
+        status: String(status || ""),
+        baseDepartment: String(department || ""),
+        currentDepartment: String(currentDepartment || ""),
+      };
+    }
+  }
+  return null;
+}
+
+function calculateWorkingDaysISO(startISO, endISO) {
+  // święta PL (dni ustawowo wolne) – 2025 + 2026
+  const holidays = new Set([
+    // 2025
+    "2025-01-01","2025-01-06","2025-04-20","2025-04-21","2025-05-01","2025-05-03",
+    "2025-06-08","2025-06-19","2025-08-15","2025-11-01","2025-11-11","2025-12-25","2025-12-26",
+    // 2026
+    "2026-01-01","2026-01-06","2026-04-05","2026-04-06","2026-05-01","2026-05-03",
+    "2026-05-24","2026-06-04","2026-08-15","2026-11-01","2026-11-11","2026-12-25","2026-12-26",
+  ]);
+
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+
+  let count = 0;
+  const cur = new Date(start);
+
+  while (cur <= end) {
+    const day = cur.getDay(); // 0 nd, 6 sob
+    const iso = cur.toISOString().slice(0, 10);
+
+    if (day !== 0 && day !== 6 && !holidays.has(iso)) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return count;
+}
+
+async function getUserVacationBalance(loginRaw, codeRaw = "") {
+  const login = String(loginRaw || "").trim();
+  const code = String(codeRaw || "").trim();
+
+  const ZERO = { przysługujący: 0, zaległy: 0, wykorzystany: 0, pozostały: 0 };
+  if (!login && !code) return ZERO;
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:ZZ`,
+  });
+
+  const values = resp.data.values || [];
+  if (values.length < 2) return ZERO;
+
+  const headers = (values[0] || []).map(h => String(h || ""));
+  const hNorm = headers.map(normHeader);
+
+  const findCol = (cands) => {
+    for (const c of cands) {
+      const idx = hNorm.indexOf(c);
+      if (idx !== -1) return idx;
+    }
+    // awaryjnie: contains (np. "login (system)" itp.)
+    for (const c of cands) {
+      const idx = hNorm.findIndex(h => h.includes(c));
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  // klucz: login albo kod/EAN
+  const idxLogin = findCol(["login"]);
+  const idxCode  = findCol(["kod", "ean", "code", "barcode", "pracownik", "id"]);
+
+  const idxPrz = findCol(["urlop_przyslugujacy"]);
+  const idxZal = findCol(["urlop_zalegly"]);
+  const idxWyk = findCol(["urlop_wykorzystany"]);
+  const idxPoz = findCol(["urlop_pozostaly"]);
+
+  // jeśli nie mamy żadnego klucza identyfikacji — nie ma jak znaleźć wiersza
+  if (idxLogin === -1 && idxCode === -1) return ZERO;
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i] || [];
+
+    const rowLogin = (idxLogin !== -1) ? String(row[idxLogin] || "").trim() : "";
+    const rowCode  = (idxCode  !== -1) ? String(row[idxCode]  || "").trim() : "";
+
+    const match =
+      (login && rowLogin && rowLogin === login) ||
+      (code  && rowCode  && String(rowCode).replace(/\s/g,'') === String(code).replace(/\s/g,''));
+
+    if (!match) continue;
+
+    const prz = idxPrz !== -1 ? safeNumber(row[idxPrz], 0) : 0;
+    const zal = idxZal !== -1 ? safeNumber(row[idxZal], 0) : 0;
+    const wyk = idxWyk !== -1 ? safeNumber(row[idxWyk], 0) : 0;
+
+    let poz = Number.NaN;
+    if (idxPoz !== -1) poz = safeNumber(row[idxPoz], Number.NaN);
+    if (!Number.isFinite(poz)) poz = Math.max(0, (prz + zal) - wyk);
+
+    return { przysługujący: prz, zaległy: zal, wykorzystany: wyk, pozostały: poz };
+  }
+
+  return ZERO;
+}
+
+async function createVacationRequest(loginRaw, startDateISO, endDateISO, comment = "", vacationType = "planowany", codeRaw = "") {
+  const login = String(loginRaw || "").trim();
+  const startISO = String(startDateISO || "").trim();
+  const endISO = String(endDateISO || "").trim();
+
+  if (!login) return { success: false, message: "Brak login" };
+  if (!startISO || !endISO) return { success: false, message: "Brak dat" };
+
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return { success: false, message: "Błędny format dat" };
+  }
+  if (start > end) return { success: false, message: "Data końcowa musi być >= początkowej" };
+
+  // zasady z DBK
+  if (vacationType === "planowany") {
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // porównanie po dacie
+    const minISO = formatISODateWarsaw(tomorrow);
+    if (startISO < minISO) {
+      return { success: false, message: "Urlop planowany musi być złożony z wyprzedzeniem min. 1 dzień" };
+    }
+  }
+
+  const workingDays = calculateWorkingDaysISO(startISO, endISO);
+  if (workingDays > 10) return { success: false, message: "Maksymalny urlop to 10 dni roboczych" };
+
+  const bal = await getUserVacationBalance(login, codeRaw);
+  if ((bal.przysługujący || 0) === 0 && (bal.pozostały || 0) === 0) {
+    return { success: false, message: "Brak dostępnych dni urlopu. Nie możesz złożyć wniosku." };
+  }
+
+  const maxDostepne = (bal.przysługujący || 0) + (bal.zaległy || 0);
+  if (workingDays > maxDostepne) {
+    return {
+      success: false,
+      message: `Nie masz wystarczającej liczby dni urlopu. Dostępne: ${maxDostepne} dni, próbujesz wystawić: ${workingDays} dni`,
+    };
+  }
+
+  const emp = await getEmployeeByLogin(login);
+  if (!emp) return { success: false, message: "Nie znaleziono pracownika" };
+
+  const sheets = await getSheetsClient();
+
+  // ID jak w DBK: (lastRow - 1)
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A2:A`,
+  });
+  const existing = (idResp.data.values || []).length;
+  const nextId = existing + 1;
+
+  const todayISO = formatISODateWarsaw(new Date());
+
+  const row = [
+    String(nextId),
+    login,
+    emp.name,
+    todayISO,
+    startISO,
+    endISO,
+    String(workingDays),
+    "Oczekujący",
+    String(vacationType || "planowany"),
+    String(comment || ""),
+    "",
+    "",
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A:L`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return { success: true, message: `Wniosek urlopowy złożony (${workingDays} dni)`, requestId: nextId };
+}
+
+async function listMyVacationRequests(loginRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return [];
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const r of rows) {
+    const [
+      id, userLogin, name, dateSubmitted, dateFrom, dateTo,
+      workingDays, status, vacationType, commentEmployee, dateDecision, commentManager
+    ] = r;
+
+    if (String(userLogin || "").trim() !== login) continue;
+
+    out.push({
+      id: safeNumber(id, 0),
+      dateFrom: String(dateFrom || ""),
+      dateTo: String(dateTo || ""),
+      workingDays: safeNumber(workingDays, 0),
+      status: String(status || ""),
+      vacationType: String(vacationType || "planowany"),
+      commentEmployee: String(commentEmployee || ""),
+      dateSubmitted: String(dateSubmitted || ""),
+      dateDecision: String(dateDecision || ""),
+      commentManager: String(commentManager || ""),
+    });
+  }
+
+  // newest first (po dacie złożenia, potem id)
+  out.sort((a, b) => (String(b.dateSubmitted).localeCompare(String(a.dateSubmitted)) || (b.id - a.id)));
+  return out;
+}
+
+// ===============================
+// ===== NIEOBECNOŚCI (DBK) ======
+// ===============================
+
+// ---------- DNI WOLNE (Dni_wolne) ----------
+// Kolumny DBK: A=ID, B=Login, C=Imie_Nazwisko, D=Data_zlozenia, E=Data, F=Typ,
+// G=Godzina_od, H=Godzina_do, I=Powod, J=Status, K=Data_decyzji, L=Komentarz_kierownika
+
+function mapDayOffType(typeRaw) {
+  const type = String(typeRaw || "").trim();
+  const typeNames = {
+    nadgodziny: "Odbiór za nadgodziny",
+    swieto: "Dzień za święto w sobotę",
+    opieka: "Opieka nad dzieckiem (Art. 188 KP)",
+    sila_wyzsza: "Siła wyższa (Art. 148¹ KP)",
+    wyjscie_prywatne: "Wyjście prywatne",
+    inny: "Inny",
+  };
+  return typeNames[type] || type || "Inny";
+}
+
+async function createDayOffRequest({ login, code, date, type, timeFrom, timeTo, reason }) {
+  const userLogin = String(login || "").trim();
+  if (!userLogin) return { success: false, message: "Brak login" };
+  if (!date) return { success: false, message: "Brak daty" };
+
+  const emp = await getEmployeeByLogin(userLogin);
+  if (!emp) return { success: false, message: "Nie znaleziono pracownika" };
+
+  const sheets = await getSheetsClient();
+
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${DAYOFF_SHEET}!A2:A`,
+  });
+  const existing = (idResp.data.values || []).length;
+  const nextId = existing + 1;
+
+  const dateSubmitted = formatISODateWarsaw(new Date());
+
+  const row = [
+    String(nextId),                     // A ID
+    userLogin,                          // B Login
+    emp.name,                           // C Imie_Nazwisko
+    dateSubmitted,                      // D Data_zlozenia
+    String(date),                       // E Data
+    mapDayOffType(type),                // F Typ
+    String(timeFrom || ""),             // G Godzina_od
+    String(timeTo || ""),               // H Godzina_do
+    String(reason || ""),               // I Powod
+    "Oczekujący",                       // J Status
+    "",                                 // K Data_decyzji
+    "",                                 // L Komentarz_kierownika
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${DAYOFF_SHEET}!A:L`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return { success: true, message: "Wniosek o dzień wolny został złożony", requestId: nextId };
+}
+
+async function listMyDayOffRequests(loginRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return [];
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${DAYOFF_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const r of rows) {
+    const [
+      id, userLogin, name, dateSubmitted, date, type,
+      timeFrom, timeTo, reason, status, dateDecision, managerComment
+    ] = r;
+
+    if (String(userLogin || "").trim() !== login) continue;
+
+    out.push({
+      id: safeNumber(id, 0),
+      date: String(date || ""),
+      type: String(type || ""),
+      timeFrom: String(timeFrom || ""),
+      timeTo: String(timeTo || ""),
+      reason: String(reason || ""),
+      status: String(status || ""),
+      dateSubmitted: String(dateSubmitted || ""),
+      dateDecision: String(dateDecision || ""),
+      managerComment: String(managerComment || ""),
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+async function listPendingDayOffRequests() {
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${DAYOFF_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const status = String(r[9] || "").trim(); // J
+    if (status !== "Oczekujący") continue;
+
+    out.push({
+      rowIndex: i + 2, // realny wiersz w sheet
+      id: safeNumber(r[0], 0),
+      login: String(r[1] || ""),
+      name: String(r[2] || ""),
+      dateSubmitted: String(r[3] || ""),
+      date: String(r[4] || ""),
+      type: String(r[5] || ""),
+      timeFrom: String(r[6] || ""),
+      timeTo: String(r[7] || ""),
+      reason: String(r[8] || ""),
+      status,
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+async function processDayOffRequest(requestIdRaw, decisionRaw, commentRaw) {
+  const requestId = safeNumber(requestIdRaw, 0);
+  const decision = String(decisionRaw || "").trim();
+  const comment = String(commentRaw || "").trim();
+
+  if (!requestId) return { success: false, message: "Brak requestId" };
+  if (!["Zatwierdzony", "Odrzucony"].includes(decision)) return { success: false, message: "Zła decyzja" };
+
+  const sheets = await getSheetsClient();
+
+  // Znajdź wiersz po ID (nie używaj ID jako numeru wiersza)
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${DAYOFF_SHEET}!A2:A`,
+  });
+  const ids = idResp.data.values || [];
+  let rowIndex = -1;
+  for (let i = 0; i < ids.length; i++) {
+    if (safeNumber(ids[i]?.[0], 0) === requestId) {
+      rowIndex = i + 2;
+      break;
+    }
+  }
+
+  if (rowIndex === -1) return { success: false, message: "Nie znaleziono wniosku #" + requestId };
+
+  const dateDecision = formatISODateWarsaw(new Date());
+
+  // DBK: J=Status, K=Data_decyzji, L=Komentarz_kierownika
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      valueInputOption: "RAW",
+      data: [
+        { range: `${DAYOFF_SHEET}!J${rowIndex}`, values: [[decision]] },
+        { range: `${DAYOFF_SHEET}!K${rowIndex}`, values: [[dateDecision]] },
+        { range: `${DAYOFF_SHEET}!L${rowIndex}`, values: [[comment]] },
+      ],
+    },
+  });
+
+  return { success: true, message: `Wniosek o dzień wolny ${decision === "Zatwierdzony" ? "zatwierdzony" : "odrzucony"}` };
+}
+
+
+// ---------- URLOPY OKOLICZNOŚCIOWE (Urlopy_okolicznosciowe) ----------
+// Kolumny DBK: A=ID, B=Login, C=Imie_Nazwisko, D=Data_zlozenia, E=Data_od, F=Data_do,
+// G=Dni, H=Typ_wydarzenia, I=Notatka, J=Status, K=Data_decyzji, L=Komentarz_kierownika
+
+function getOccasionalTypeInfo(typeRaw) {
+  const type = String(typeRaw || "").trim();
+  const typeInfo = {
+    slub_wlasny: { name: "Ślub własny", days: 2 },
+    slub_dziecka: { name: "Ślub dziecka", days: 1 },
+    narodziny: { name: "Narodziny dziecka", days: 2 },
+    zgon_malzonka: { name: "Zgon małżonka/dziecka/rodzica", days: 2 },
+    zgon_inny: { name: "Zgon rodzeństwa/teściów/dziadków", days: 1 },
+  };
+  return typeInfo[type] || { name: type || "Inny", days: 1 };
+}
+
+async function createOccasionalLeaveRequest({ login, code, type, dateStart, dateEnd, note }) {
+  const userLogin = String(login || "").trim();
+  if (!userLogin) return { success: false, message: "Brak login" };
+  if (!dateStart || !dateEnd) return { success: false, message: "Brak dat" };
+
+  const emp = await getEmployeeByLogin(userLogin);
+  if (!emp) return { success: false, message: "Nie znaleziono pracownika" };
+
+  const sheets = await getSheetsClient();
+
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${OCCASIONAL_SHEET}!A2:A`,
+  });
+  const existing = (idResp.data.values || []).length;
+  const nextId = existing + 1;
+
+  const dateSubmitted = formatISODateWarsaw(new Date());
+  const info = getOccasionalTypeInfo(type);
+
+  const row = [
+    String(nextId),            // A
+    userLogin,                 // B
+    emp.name,                  // C
+    dateSubmitted,             // D
+    String(dateStart),         // E
+    String(dateEnd),           // F
+    String(info.days),         // G
+    String(info.name),         // H
+    String(note || ""),        // I
+    "Oczekujący",              // J
+    "",                        // K
+    "",                        // L
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${OCCASIONAL_SHEET}!A:L`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return { success: true, message: `Wniosek o urlop okolicznościowy został złożony (${info.days} dni)`, requestId: nextId };
+}
+
+async function listMyOccasionalLeaveRequests(loginRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return [];
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${OCCASIONAL_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const r of rows) {
+    const [
+      id, userLogin, name, dateSubmitted, dateFrom, dateTo,
+      days, type, note, status, dateDecision, managerComment
+    ] = r;
+
+    if (String(userLogin || "").trim() !== login) continue;
+
+    out.push({
+      id: safeNumber(id, 0),
+      dateFrom: String(dateFrom || ""),
+      dateTo: String(dateTo || ""),
+      days: safeNumber(days, 0),
+      type: String(type || ""),
+      note: String(note || ""),
+      status: String(status || ""),
+      dateSubmitted: String(dateSubmitted || ""),
+      dateDecision: String(dateDecision || ""),
+      managerComment: String(managerComment || ""),
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+async function listPendingOccasionalLeaveRequests() {
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${OCCASIONAL_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const status = String(r[9] || "").trim(); // J
+    if (status !== "Oczekujący") continue;
+
+    out.push({
+      rowIndex: i + 2,
+      id: safeNumber(r[0], 0),
+      login: String(r[1] || ""),
+      name: String(r[2] || ""),
+      dateSubmitted: String(r[3] || ""),
+      dateFrom: String(r[4] || ""),
+      dateTo: String(r[5] || ""),
+      days: safeNumber(r[6], 0),
+      type: String(r[7] || ""),
+      note: String(r[8] || ""),
+      status,
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+async function processOccasionalLeaveRequest(requestIdRaw, decisionRaw, commentRaw) {
+  const requestId = safeNumber(requestIdRaw, 0);
+  const decision = String(decisionRaw || "").trim();
+  const comment = String(commentRaw || "").trim();
+
+  if (!requestId) return { success: false, message: "Brak requestId" };
+  if (!["Zatwierdzony", "Odrzucony"].includes(decision)) return { success: false, message: "Zła decyzja" };
+
+  const sheets = await getSheetsClient();
+
+  // Znajdź wiersz po ID
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${OCCASIONAL_SHEET}!A2:A`,
+  });
+  const ids = idResp.data.values || [];
+  let rowIndex = -1;
+  for (let i = 0; i < ids.length; i++) {
+    if (safeNumber(ids[i]?.[0], 0) === requestId) {
+      rowIndex = i + 2;
+      break;
+    }
+  }
+
+  if (rowIndex === -1) return { success: false, message: "Nie znaleziono wniosku #" + requestId };
+
+  const dateDecision = formatISODateWarsaw(new Date());
+
+  // DBK: J=Status, K=Data_decyzji, L=Komentarz_kierownika
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      valueInputOption: "RAW",
+      data: [
+        { range: `${OCCASIONAL_SHEET}!J${rowIndex}`, values: [[decision]] },
+        { range: `${OCCASIONAL_SHEET}!K${rowIndex}`, values: [[dateDecision]] },
+        { range: `${OCCASIONAL_SHEET}!L${rowIndex}`, values: [[comment]] },
+      ],
+    },
+  });
+
+  return { success: true, message: `Wniosek o urlop okolicznościowy ${decision === "Zatwierdzony" ? "zatwierdzony" : "odrzucony"}` };
+}
+
+
+// ---------- L4 (Zwolnienia_lekarskie) ----------
+// Kolumny DBK: A=ID, B=Login, C=Imie_Nazwisko, D=Data_od, E=Data_do, F=Dni, G=Status, H=Typ_L4, I=Notatka
+
+function calcCalendarDays(startISO, endISO) {
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  const diff = Math.abs(end.getTime() - start.getTime());
+  return Math.ceil(diff / (1000 * 60 * 60 * 24)) + 1;
+}
+
+function l4StatusForToday(startISO, endISO) {
+  const today = new Date();
+  today.setHours(0,0,0,0);
+
+  const s = new Date(startISO);
+  const e = new Date(endISO);
+  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return "Zaplanowane";
+
+  s.setHours(0,0,0,0);
+  e.setHours(0,0,0,0);
+
+  if (today >= s && today <= e) return "Trwa";
+  if (today > e) return "Zakończone";
+  return "Zaplanowane";
+}
+
+async function registerL4({ employeeLogin, startDate, endDate, l4Type, note }) {
+  const login = String(employeeLogin || "").trim();
+  if (!login) return { success: false, message: "Brak employeeLogin" };
+  if (!startDate || !endDate) return { success: false, message: "Brak dat" };
+
+  const emp = await getEmployeeByLogin(login);
+  const name = emp?.name || login;
+
+  const sheets = await getSheetsClient();
+
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${L4_SHEET}!A2:A`,
+  });
+  const existing = (idResp.data.values || []).length;
+  const nextId = existing + 1;
+
+  const days = calcCalendarDays(startDate, endDate);
+  const status = l4StatusForToday(startDate, endDate);
+
+  const row = [
+    String(nextId),             // A
+    login,                      // B
+    name,                       // C
+    String(startDate),          // D
+    String(endDate),            // E
+    String(days),               // F
+    status,                     // G
+    String(l4Type || "Choroba"),// H
+    String(note || ""),         // I
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${L4_SHEET}!A:I`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return { success: true, message: `Zarejestrowano L4 dla ${name} (${days} dni)` };
+}
+
+async function listMyL4(loginRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return [];
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${L4_SHEET}!A2:I`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const r of rows) {
+    const [id, userLogin, name, dateFrom, dateTo, days, status, type, note] = r;
+    if (String(userLogin || "").trim() !== login) continue;
+
+    out.push({
+      id: safeNumber(id, 0),
+      login: String(userLogin || ""),
+      name: String(name || ""),
+      dateFrom: String(dateFrom || ""),
+      dateTo: String(dateTo || ""),
+      days: safeNumber(days, 0),
+      status: String(status || ""),
+      type: String(type || ""),
+      note: String(note || ""),
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+// ===============================
+// ===== URLOPY - ZARZĄDZANIE ====
+// ===============================
+
+// Zamienia indeks kolumny (0-based) na literę/litery A1 (np. 0->'A', 25->'Z', 26->'AA')
+function colLetter(idx) {
+  let result = "";
+  let n = idx;
+  while (n >= 0) {
+    result = String.fromCharCode((n % 26) + 65) + result;
+    n = Math.floor(n / 26) - 1;
+  }
+  return result;
+}
+
+// Sprawdza kolizje z zatwierdzonymi urlopami (bez wniosku excludeId)
+// Zwraca { conflicts, maxAllowed, canApprove }
+async function checkVacationCollisions(startISO, endISO, excludeId = null) {
+  const sheets = await getSheetsClient();
+
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A2:H`,
+  });
+
+  const rows = resp.data.values || [];
+  let conflicts = 0;
+
+  for (const r of rows) {
+    const id = String(r?.[0] || "").trim();
+    const status = String(r?.[7] || "").trim();
+
+    if (excludeId !== null && String(excludeId) === id) continue;
+    if (status !== "Zatwierdzony") continue;
+
+    const fromISO = dateToISOWarsaw(r?.[4]);
+    const toISO = dateToISOWarsaw(r?.[5]);
+    if (!fromISO || !toISO) continue;
+
+    if (startISO <= toISO && endISO >= fromISO) conflicts++;
+  }
+
+  return { conflicts, maxAllowed: 3, canApprove: conflicts < 3 };
+}
+
+// Lista oczekujących wniosków urlopowych z kolizjami — dla kierownika
+async function listPendingVacationRequests() {
+  const sheets = await getSheetsClient();
+
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+
+  // Zbierz zatwierdzone raz, żeby nie robić N zapytań do Sheets
+  const approved = rows
+    .filter(r => String(r?.[7] || "").trim() === "Zatwierdzony")
+    .map(r => ({
+      id: String(r?.[0] || "").trim(),
+      fromISO: dateToISOWarsaw(r?.[4]),
+      toISO: dateToISOWarsaw(r?.[5]),
+    }))
+    .filter(a => a.fromISO && a.toISO);
+
+  const out = [];
+
+  for (const r of rows) {
+    if (String(r?.[7] || "").trim() !== "Oczekujący") continue;
+
+    const id = String(r?.[0] || "").trim();
+    const fromISO = dateToISOWarsaw(r?.[4]);
+    const toISO = dateToISOWarsaw(r?.[5]);
+
+    let conflicts = 0;
+    for (const a of approved) {
+      if (a.id === id) continue;
+      if (fromISO <= a.toISO && toISO >= a.fromISO) conflicts++;
+    }
+
+    out.push({
+      id: safeNumber(r?.[0], 0),
+      login: String(r?.[1] || ""),
+      name: String(r?.[2] || ""),
+      dateSubmitted: String(r?.[3] || ""),
+      dateFrom: fromISO,
+      dateTo: toISO,
+      workingDays: safeNumber(r?.[6], 0),
+      vacationType: String(r?.[8] || "planowany"),
+      commentEmployee: String(r?.[9] || ""),
+      collisions: { conflicts, maxAllowed: 3, canApprove: conflicts < 3 },
+    });
+  }
+
+  out.sort((a, b) => String(a.dateSubmitted).localeCompare(String(b.dateSubmitted)));
+  return out;
+}
+
+// Aktualizuje saldo urlopowe pracownika po zatwierdzeniu wniosku
+// login: login pracownika, daysUsed: liczba dni do odjęcia
+async function updateVacationBalance(login, daysUsed) {
+  const sheets = await getSheetsClient();
+
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHIFTS_SHEET}!A1:ZZ`,
+  });
+
+  const values = resp.data.values || [];
+  if (values.length < 2) return false;
+
+  const headers = (values[0] || []).map(h => String(h || ""));
+  const hNorm = headers.map(normHeader);
+
+  const findCol = (cands) => {
+    for (const c of cands) {
+      const idx = hNorm.indexOf(c);
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const idxLogin = findCol(["login"]);
+  const idxPrz = findCol(["urlop_przyslugujacy"]);
+  const idxZal = findCol(["urlop_zalegly"]);
+  const idxWyk = findCol(["urlop_wykorzystany"]);
+  const idxPoz = findCol(["urlop_pozostaly"]);
+
+  if (idxLogin === -1 || idxWyk === -1 || idxPoz === -1) return false;
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i] || [];
+    const rowLogin = String(row[idxLogin] || "").trim();
+    if (rowLogin !== login) continue;
+
+    const currentPrz = idxPrz !== -1 ? safeNumber(row[idxPrz], 0) : 0;
+    const currentZal = idxZal !== -1 ? safeNumber(row[idxZal], 0) : 0;
+    const currentWyk = safeNumber(row[idxWyk], 0);
+
+    const newWyk = currentWyk + daysUsed;
+    const totalDostepne = currentPrz + currentZal;
+    const newPoz = Math.max(0, totalDostepne - newWyk);
+
+    const sheetRow = i + 1; // +1 bo wiersz nagłówka (i=0 to wiersz 1)
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption: "RAW",
+        data: [
+          { range: `${SHIFTS_SHEET}!${colLetter(idxWyk)}${sheetRow}`, values: [[newWyk]] },
+          { range: `${SHIFTS_SHEET}!${colLetter(idxPoz)}${sheetRow}`, values: [[newPoz]] },
+        ],
+      },
+    });
+
+    return true;
+  }
+
+  return false;
+}
+
+// Zatwierdza lub odrzuca wniosek urlopowy; przy zatwierdzeniu aktualizuje saldo
+async function processVacationRequest(requestIdRaw, decisionRaw, commentRaw) {
+  const requestId = safeNumber(requestIdRaw, 0);
+  const decision = String(decisionRaw || "").trim();
+  const comment = String(commentRaw || "").trim();
+
+  if (!requestId) return { success: false, message: "Brak requestId" };
+  if (!["Zatwierdzony", "Odrzucony"].includes(decision)) return { success: false, message: "Zła decyzja" };
+
+  const sheets = await getSheetsClient();
+
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${VACATION_SHEET}!A2:L`,
+  });
+
+  const rows = resp.data.values || [];
+  let rowIndex = -1;
+  let login = "";
+  let workingDays = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    if (safeNumber(rows[i]?.[0], 0) === requestId) {
+      rowIndex = i + 2; // +2: nagłówek (wiersz 1) + A2 offset
+      login = String(rows[i]?.[1] || "").trim();
+      workingDays = safeNumber(rows[i]?.[6], 0);
+      break;
+    }
+  }
+
+  if (rowIndex === -1) return { success: false, message: "Nie znaleziono wniosku #" + requestId };
+
+  const dateDecision = formatISODateWarsaw(new Date());
+
+  // Arkusz Wnioski_urlopowe: H=Status, K=Data_decyzji, L=Komentarz_kierownika
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      valueInputOption: "RAW",
+      data: [
+        { range: `${VACATION_SHEET}!H${rowIndex}`, values: [[decision]] },
+        { range: `${VACATION_SHEET}!K${rowIndex}`, values: [[dateDecision]] },
+        { range: `${VACATION_SHEET}!L${rowIndex}`, values: [[comment]] },
+      ],
+    },
+  });
+
+  // Przy zatwierdzeniu — odjęcie dni z salda
+  if (decision === "Zatwierdzony" && login && workingDays > 0) {
+    await updateVacationBalance(login, workingDays);
+  }
+
+  return {
+    success: true,
+    message: `Wniosek urlopowy ${decision === "Zatwierdzony" ? "zatwierdzony" : "odrzucony"}`,
+  };
+}
+
+// ===============================
+// ===== PLAN ROCZNY ===========
+// ===============================
+// Arkusz Plan_roczny: A=ID, B=Login, C=Imie_Nazwisko, D=Data_zlozenia,
+// E=Rok, F=Liczba_dni, G=Lista_dat(JSON), H=Status, I=Data_decyzji, J=Komentarz_kierownika
+
+// Składa lub aktualizuje plan roczny pracownika
+// planData: { login, name, year, dates?, newDates?, removedDates? }
+async function submitYearPlanRequest(planData) {
+  const login = String(planData?.login || "").trim();
+  const year = Number(planData?.year || new Date().getFullYear());
+  if (!login) return { success: false, message: "Brak login" };
+
+  const sheets = await getSheetsClient();
+
+  // Pobierz istniejące wiersze dla tego pracownika i roku
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:J`,
+  });
+
+  const rows = resp.data.values || [];
+  let existingPendingRowIndex = -1;
+  let existingPendingDates = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const rowLogin = String(r?.[1] || "").trim();
+    const rowYear = Number(r?.[4] || 0);
+    const rowStatus = String(r?.[7] || "").trim();
+
+    if (rowLogin === login && rowYear === year && rowStatus === "Oczekujący") {
+      existingPendingRowIndex = i + 2;
+      try {
+        const raw = String(r?.[6] || "[]");
+        existingPendingDates = JSON.parse(raw);
+        if (!Array.isArray(existingPendingDates)) existingPendingDates = [];
+      } catch (_) {
+        existingPendingDates = [];
+      }
+      break;
+    }
+  }
+
+  // Oblicz finalną listę dat
+  let finalDates = [];
+
+  if (planData.newDates || planData.removedDates) {
+    finalDates = [...existingPendingDates];
+    if (Array.isArray(planData.removedDates)) {
+      finalDates = finalDates.filter(d => !planData.removedDates.includes(d));
+    }
+    if (Array.isArray(planData.newDates)) {
+      for (const d of planData.newDates) {
+        if (!finalDates.includes(d)) finalDates.push(d);
+      }
+    }
+  } else if (Array.isArray(planData.dates)) {
+    finalDates = planData.dates;
+  }
+
+  finalDates.sort();
+
+  if (finalDates.length === 0) {
+    if (existingPendingRowIndex > 0) {
+      // Usuń pusty plan — nadpisz status na "Usunięty" (nie można usuwać wierszy przez API v4 values)
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${YEAR_PLAN_SHEET}!H${existingPendingRowIndex}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [["Usunięty"]] },
+      });
+      return { success: true, message: "Plan roczny został usunięty (brak zaplanowanych dni)" };
+    }
+    return { success: false, message: "Nie ma żadnych dni do zapisania" };
+  }
+
+  const dateSubmitted = formatISODateWarsaw(new Date());
+  const emp = await getEmployeeByLogin(login);
+  const name = emp?.name || String(planData?.name || login);
+
+  if (existingPendingRowIndex > 0) {
+    // Aktualizuj istniejący plan oczekujący
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption: "RAW",
+        data: [
+          { range: `${YEAR_PLAN_SHEET}!D${existingPendingRowIndex}`, values: [[dateSubmitted]] },
+          { range: `${YEAR_PLAN_SHEET}!F${existingPendingRowIndex}`, values: [[finalDates.length]] },
+          { range: `${YEAR_PLAN_SHEET}!G${existingPendingRowIndex}`, values: [[JSON.stringify(finalDates)]] },
+        ],
+      },
+    });
+
+    const added = Array.isArray(planData.newDates) ? planData.newDates.length : 0;
+    const removed = Array.isArray(planData.removedDates) ? planData.removedDates.length : 0;
+    let msg = `Plan roczny na ${year} zaktualizowany (${finalDates.length} dni)`;
+    if (added > 0) msg += `, dodano: ${added}`;
+    if (removed > 0) msg += `, usunięto: ${removed}`;
+
+    return { success: true, message: msg };
+  }
+
+  // Utwórz nowy plan
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:A`,
+  });
+  const existingIds = idResp.data.values || [];
+  const nextId = existingIds.length + 1;
+
+  const row = [
+    String(nextId),
+    login,
+    name,
+    dateSubmitted,
+    String(year),
+    String(finalDates.length),
+    JSON.stringify(finalDates),
+    "Oczekujący",
+    "",
+    "",
+  ];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A:J`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  return {
+    success: true,
+    message: `Plan roczny na ${year} złożony (${finalDates.length} dni)`,
+    requestId: nextId,
+  };
+}
+
+// Pobiera plany roczne pracownika; year opcjonalny filtr
+async function listMyYearPlanRequests(loginRaw, yearRaw) {
+  const login = String(loginRaw || "").trim();
+  if (!login) return [];
+
+  const year = yearRaw ? Number(yearRaw) : null;
+
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:J`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (const r of rows) {
+    if (String(r?.[1] || "").trim() !== login) continue;
+    if (year !== null && Number(r?.[4] || 0) !== year) continue;
+
+    let dates = [];
+    try { dates = JSON.parse(String(r?.[6] || "[]")); } catch (_) { dates = []; }
+    if (!Array.isArray(dates)) dates = [];
+
+    out.push({
+      id: safeNumber(r?.[0], 0),
+      year: Number(r?.[4] || 0),
+      daysCount: safeNumber(r?.[5], 0),
+      dates,
+      status: String(r?.[7] || ""),
+      dateSubmitted: String(r?.[3] || ""),
+      dateDecision: String(r?.[8] || ""),
+      managerComment: String(r?.[9] || ""),
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+// Oczekujące plany roczne — dla kierownika
+async function listPendingYearPlanRequests() {
+  const sheets = await getSheetsClient();
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:J`,
+  });
+
+  const rows = resp.data.values || [];
+  const out = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (String(r?.[7] || "").trim() !== "Oczekujący") continue;
+
+    let dates = [];
+    try { dates = JSON.parse(String(r?.[6] || "[]")); } catch (_) { dates = []; }
+    if (!Array.isArray(dates)) dates = [];
+
+    out.push({
+      rowIndex: i + 2,
+      id: safeNumber(r?.[0], 0),
+      login: String(r?.[1] || ""),
+      name: String(r?.[2] || ""),
+      dateSubmitted: String(r?.[3] || ""),
+      year: Number(r?.[4] || 0),
+      daysCount: safeNumber(r?.[5], 0),
+      dates,
+      status: String(r?.[7] || ""),
+    });
+  }
+
+  out.sort((a, b) => b.id - a.id);
+  return out;
+}
+
+// Zatwierdza lub odrzuca plan roczny
+async function processYearPlanRequest(requestIdRaw, decisionRaw, commentRaw) {
+  const requestId = safeNumber(requestIdRaw, 0);
+  const decision = String(decisionRaw || "").trim();
+  const comment = String(commentRaw || "").trim();
+
+  if (!requestId) return { success: false, message: "Brak requestId" };
+  if (!["Zatwierdzony", "Odrzucony"].includes(decision)) return { success: false, message: "Zła decyzja" };
+
+  const sheets = await getSheetsClient();
+
+  const idResp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:A`,
+  });
+  const ids = idResp.data.values || [];
+  let rowIndex = -1;
+  for (let i = 0; i < ids.length; i++) {
+    if (safeNumber(ids[i]?.[0], 0) === requestId) {
+      rowIndex = i + 2;
+      break;
+    }
+  }
+
+  if (rowIndex === -1) return { success: false, message: "Nie znaleziono planu #" + requestId };
+
+  const dateDecision = formatISODateWarsaw(new Date());
+
+  // Plan_roczny: H=Status, I=Data_decyzji, J=Komentarz_kierownika
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      valueInputOption: "RAW",
+      data: [
+        { range: `${YEAR_PLAN_SHEET}!H${rowIndex}`, values: [[decision]] },
+        { range: `${YEAR_PLAN_SHEET}!I${rowIndex}`, values: [[dateDecision]] },
+        { range: `${YEAR_PLAN_SHEET}!J${rowIndex}`, values: [[comment]] },
+      ],
+    },
+  });
+
+  return {
+    success: true,
+    message: `Plan roczny ${decision === "Zatwierdzony" ? "zatwierdzony" : "odrzucony"}`,
+  };
+}
+
+// Zatwierdza plan roczny z wybranym podzbiorem dat (częściowe zatwierdzenie)
+// decision: "Zatwierdzony" | "Częściowo zatwierdzony" | "Odrzucony"
+async function processYearPlanWithDates(requestIdRaw, decisionRaw, commentRaw, selectedDatesRaw) {
+  const requestId = safeNumber(requestIdRaw, 0);
+  const decision = String(decisionRaw || "").trim();
+  const comment = String(commentRaw || "").trim();
+  const selectedDates = Array.isArray(selectedDatesRaw) ? selectedDatesRaw : [];
+
+  if (!requestId) return { success: false, message: "Brak requestId" };
+  if (!["Zatwierdzony", "Częściowo zatwierdzony", "Odrzucony"].includes(decision)) {
+    return { success: false, message: "Zła decyzja" };
+  }
+
+  const sheets = await getSheetsClient();
+
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${YEAR_PLAN_SHEET}!A2:G`,
+  });
+  const rows = resp.data.values || [];
+  let rowIndex = -1;
+  let originalDates = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    if (safeNumber(rows[i]?.[0], 0) === requestId) {
+      rowIndex = i + 2;
+      try { originalDates = JSON.parse(String(rows[i]?.[6] || "[]")); } catch (_) { originalDates = []; }
+      if (!Array.isArray(originalDates)) originalDates = [];
+      break;
+    }
+  }
+
+  if (rowIndex === -1) return { success: false, message: "Nie znaleziono planu #" + requestId };
+
+  const dateDecision = formatISODateWarsaw(new Date());
+  const finalDates = decision === "Odrzucony" ? originalDates : selectedDates;
+
+  // F=Liczba_dni, G=Lista_dat, H=Status, I=Data_decyzji, J=Komentarz_kierownika
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      valueInputOption: "RAW",
+      data: [
+        { range: `${YEAR_PLAN_SHEET}!F${rowIndex}`, values: [[finalDates.length]] },
+        { range: `${YEAR_PLAN_SHEET}!G${rowIndex}`, values: [[JSON.stringify(finalDates)]] },
+        { range: `${YEAR_PLAN_SHEET}!H${rowIndex}`, values: [[decision]] },
+        { range: `${YEAR_PLAN_SHEET}!I${rowIndex}`, values: [[dateDecision]] },
+        { range: `${YEAR_PLAN_SHEET}!J${rowIndex}`, values: [[comment]] },
+      ],
+    },
+  });
+
+  let message;
+  if (decision === "Zatwierdzony") {
+    message = `Plan roczny zatwierdzony (${finalDates.length} dni)`;
+  } else if (decision === "Częściowo zatwierdzony") {
+    message = `Plan częściowo zatwierdzony (${finalDates.length}/${originalDates.length} dni)`;
+  } else {
+    message = "Plan roczny odrzucony";
+  }
+
+  return { success: true, message };
+}
+
+// ===== FUNKCJE POMOCNICZE DLA API =====
+
+async function getYearPlanDatesForCalendar(loginRaw, year) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+  const requests = await listMyYearPlanRequests(login, year);
+  const result = { planned: [], approved: [], rejected: [] };
+
+  for (const req of requests) {
+    let dates = [];
+    try {
+      dates = typeof req.dates === "string"
+        ? JSON.parse(req.dates)
+        : Array.isArray(req.dates) ? req.dates : [];
+    } catch (e) { dates = []; }
+
+    if (req.status === "Oczekujący") {
+      result.planned.push(...dates);
+    } else if (req.status === "Zatwierdzony" || req.status === "Częściowo zatwierdzony") {
+      result.approved.push(...dates);
+    } else if (req.status === "Odrzucony") {
+      result.rejected.push(...dates);
+    }
+  }
+
+  result.planned  = [...new Set(result.planned)];
+  result.approved = [...new Set(result.approved)];
+  result.rejected = [...new Set(result.rejected)];
+  return result;
+}
+
+async function getPendingAbsenceCountsByType() {
+  const sheets = await getSheetsClient();
+
+  const [vacResp, planResp, dayResp, occResp] = await Promise.all([
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${VACATION_SHEET}!H2:H` }),
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${YEAR_PLAN_SHEET}!H2:H` }),
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${DAYOFF_SHEET}!J2:J` }),
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${OCCASIONAL_SHEET}!J2:J` }),
+  ]);
+
+  const count = (rows) => (rows || []).filter(r => (r[0] || "") === "Oczekujący").length;
+
+  return {
+    vacation: count(vacResp.data.values),
+    yearplan: count(planResp.data.values),
+    dayoff:   count(dayResp.data.values),
+    occasional: count(occResp.data.values),
+  };
+}
+
+async function getPendingAbsenceRequestsCount() {
+  const counts = await getPendingAbsenceCountsByType();
+  return counts.vacation + counts.dayoff + counts.occasional + counts.yearplan;
+}
+
+async function getUserAllAbsenceHistory(loginRaw) {
+  const login = String(loginRaw || "").trim().toLowerCase();
+
+  const [vacations, dayoffs, occasionals, yearplans] = await Promise.all([
+    listMyVacationRequests(login),
+    listMyDayOffRequests(login),
+    listMyOccasionalLeaveRequests(login),
+    listMyYearPlanRequests(login, null),
+  ]);
+
+  const all = [];
+
+  for (const r of vacations) {
+    all.push({
+      type: "vacation", typeIcon: "🏖️", typeName: "Urlop wypoczynkowy",
+      status: r.status, dateFrom: r.dateFrom, dateTo: r.dateTo,
+      days: r.workingDays, details: r.vacationType || "",
+      dateSubmitted: r.dateSubmitted,
+    });
+  }
+
+  for (const r of dayoffs) {
+    all.push({
+      type: "dayoff", typeIcon: "📅", typeName: "Dzień wolny",
+      status: r.status, dateFrom: r.date, dateTo: r.date,
+      days: null, details: r.type || "",
+      dateSubmitted: r.dateSubmitted,
+    });
+  }
+
+  for (const r of occasionals) {
+    all.push({
+      type: "occasional", typeIcon: "🎊", typeName: "Urlop okolicznościowy",
+      status: r.status, dateFrom: r.dateFrom, dateTo: r.dateTo,
+      days: r.days, details: r.type || "",
+      dateSubmitted: r.dateSubmitted,
+    });
+  }
+
+  for (const r of yearplans) {
+    all.push({
+      type: "yearplan", typeIcon: "📆", typeName: "Plan roczny",
+      status: r.status, dateFrom: String(r.year || ""), dateTo: String(r.year || ""),
+      days: r.daysCount, details: `Rok ${r.year} — ${r.daysCount} dni`,
+      dateSubmitted: r.dateSubmitted,
+    });
+  }
+
+  all.sort((a, b) => String(b.dateSubmitted).localeCompare(String(a.dateSubmitted)));
+  return all;
+}
+
+module.exports = {
+  getEmployeeByCode,
+  updateEmployeeStatus,
+  updateEmployeeDepartment,
+  addLog,
+
+  // announcements
+  getUnreadAnnouncements,
+  markAnnouncementAsRead,
+  listAnnouncementsForManager,
+  listEmployeesForRecipients,
+  createAnnouncement,
+
+  // workforce
+  getWorkforceLiveSnapshot,
+  getActiveEmployees,
+
+  // dashboard
+  getDashboardSnapshot,
+  getDashboardFull,
+  getAbsenceHistory,
+  getDashboardReport,
+
+  // vacations
+  getUserVacationBalance,
+  createVacationRequest,
+  listMyVacationRequests,
+  listPendingVacationRequests,
+  processVacationRequest,
+  checkVacationCollisions,
+
+  // year plan
+  submitYearPlanRequest,
+  listMyYearPlanRequests,
+  listPendingYearPlanRequests,
+  processYearPlanRequest,
+  processYearPlanWithDates,
+
+  // absences (DBK)
+  createDayOffRequest,
+  listMyDayOffRequests,
+  listPendingDayOffRequests,
+  processDayOffRequest,
+
+  createOccasionalLeaveRequest,
+  listMyOccasionalLeaveRequests,
+  listPendingOccasionalLeaveRequests,
+  processOccasionalLeaveRequest,
+
+  registerL4,
+  listMyL4,
+
+  // helper endpoints
+  getYearPlanDatesForCalendar,
+  getPendingAbsenceCountsByType,
+  getPendingAbsenceRequestsCount,
+  getUserAllAbsenceHistory,
+};
